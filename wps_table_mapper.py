@@ -19,15 +19,30 @@ WPS表格字段映射工具（麒麟Linux版）
 
 依赖
 ----
+    # 通用（Windows/macOS/x86 Linux）：
     pip install PyQt5 openpyxl
     # 读取 .xls 需要额外安装：
     pip install xlrd
+
+    # 麒麟 Linux / ARM64 / 龙芯 等国产平台（优先 apt，避免 pip 没有预编译包）：
+    sudo apt update
+    sudo apt install -y python3-pyqt5 python3-openpyxl
+    # 如需读取 .xls 再加装：
+    sudo apt install -y python3-xlrd
+
+    # 【关键】麒麟源常见报错处理：
+    # 若提示「python3-pyqt5.qtsvg : 依赖: python3-pyqt5 (= 5.14.1...) 但是 5.15.4... 正要被安装」：
+    #   → 去掉 qtsvg（代码未用到），冲突部分用 pip 补齐：
+    #     sudo apt install -y python3-pyqt5
+    #     python3 -m pip install openpyxl xlrd
 
 说明
 ----
 - openpyxl 原生只支持 .xlsx/.xlsm。对 .xls 文件采用 xlrd 读取（仅取表头/数据），
   且 .xls 目标表无法保留原格式，输出会生成新的 .xlsx（程序会给出提示）。
-- 麒麟 Linux 自带或可用 apt 安装 PyQt5：sudo apt install python3-pyqt5 python3-openpyxl
+- 麒麟 Linux 通过 apt 安装 python3-pyqt5 即可满足运行；不要装 python3-pyqt5.qtsvg
+  （本程序未使用 QtSvg，且麒麟源内该包常与新版 python3-pyqt5 产生版本冲突）。
+- 程序导入时 PyQt5 失败会自动回退尝试 PyQt6；两种绑定都能正常运行。
 """
 
 import sys
@@ -36,7 +51,82 @@ import re
 import json
 import datetime
 
+# ---------- 平台与架构检测 ----------
+def _detect_platform():
+    """返回 (os_family, arch, is_kylin_linux)。"""
+    import platform
+    os_name = platform.system().lower()
+    arch = platform.machine().lower()
+    is_kylin = False
+    if os_name == "linux":
+        try:
+            with open("/etc/os-release", "r", encoding="utf-8") as f:
+                content = f.read().lower()
+                if "kylin" in content or "银河麒麟" in content:
+                    is_kylin = True
+        except Exception:
+            pass
+    return os_name, arch, is_kylin
+
+
 # ---------- 依赖检查 ----------
+_PYQT_VER = None   # 运行时绑定："PyQt5" 或 "PyQt6"
+
+def _install_hint_pyqt(detail_err=""):
+    """根据当前平台生成最合适的 PyQt 安装指引。"""
+    os_name, arch, is_kylin = _detect_platform()
+    lines = []
+    lines.append(f"无法加载 PyQt5/PyQt6（{detail_err}）")
+    lines.append(f"当前解释器：{sys.executable}")
+    lines.append(f"平台信息：os={os_name} arch={arch}")
+    lines.append("")
+
+    if is_kylin or (os_name == "linux" and arch in ("aarch64", "arm64", "loongarch64", "sw_64")):
+        # 麒麟 / ARM64 / 龙芯 / 申威 等国产平台：优先 apt 系统包
+        lines.append("【推荐】使用系统包管理器安装（ARM/国产平台通常没有 PyPI 预编译包）：")
+        lines.append("  sudo apt update")
+        lines.append("  # 注：不装 python3-pyqt5.qtsvg，避免麒麟源内 pyqt5 版本冲突（代码未使用 QtSvg）")
+        lines.append("  sudo apt install -y python3-pyqt5 python3-openpyxl")
+        lines.append("  # 如需读取 .xls 再加装：sudo apt install -y python3-xlrd")
+        lines.append("")
+        lines.append("【麒麟源版本冲突处理】若出现「依赖: python3-pyqt5 (= 5.14.1...) 但是 5.15.4... 正要被安装」这类错误：")
+        lines.append("  方案 A（推荐）——只装能装上的，剩余用 pip：")
+        lines.append("    sudo apt install -y python3-pyqt5")
+        lines.append(f"    {sys.executable} -m pip install openpyxl xlrd")
+        lines.append("  方案 B——用 aptitude 自动降级解决冲突（需要先装 aptitude）：")
+        lines.append("    sudo apt install -y aptitude && sudo aptitude install -y python3-pyqt5 python3-openpyxl")
+        lines.append("")
+        lines.append("【备选】如系统源完全无可用版本，再试 pip（需要有编译环境，成功率低）：")
+        lines.append(f"  {sys.executable} -m pip install --upgrade pip")
+        lines.append(f"  {sys.executable} -m pip install PyQt5 openpyxl xlrd")
+    elif os_name == "linux":
+        lines.append("【推荐】使用系统包管理器：")
+        lines.append("  sudo apt install -y python3-pyqt5 python3-openpyxl")
+        lines.append("  # 麒麟源若遇到 qt.svg 版本冲突，只装 python3-pyqt5，剩余用 pip 补：")
+        lines.append(f"  #   {sys.executable} -m pip install openpyxl xlrd")
+        lines.append("")
+        lines.append("或使用 pip：")
+        lines.append(f"  {sys.executable} -m pip install PyQt5 openpyxl xlrd")
+    elif os_name == "darwin":
+        lines.append(f"请运行：")
+        lines.append(f"  {sys.executable} -m pip install PyQt5 openpyxl xlrd")
+    else:
+        # Windows 等
+        lines.append(f"请运行（需要与当前解释器一致）：")
+        lines.append(f"  {sys.executable} -m pip install --upgrade pip")
+        lines.append(f"  {sys.executable} -m pip install PyQt5 openpyxl xlrd")
+    return "\n".join(lines) + "\n"
+
+
+# 先探测 sip 情况，用于区分是「模块缺失」还是「sip 版本不匹配」
+try:
+    import sip as _sip_mod
+    _sip_info = f"sip={_sip_mod.__file__}"
+except Exception as _e:
+    _sip_info = f"sip不可用: {_e}"
+
+# 1) 优先尝试 PyQt5
+_import_err = ""
 try:
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -47,23 +137,88 @@ try:
     )
     from PyQt5.QtCore import Qt, QSize, pyqtSignal
     from PyQt5.QtGui import QFont, QColor, QIcon, QPixmap
-except ImportError as e:
-    sys.stderr.write(
-        f"缺少 PyQt5（{e}）\n"
-        f"请运行与当前解释器一致的安装命令：\n"
-        f"  {sys.executable} -m pip install PyQt5\n"
-        f"（当前解释器：{sys.executable}）\n"
-    )
-    sys.exit(1)
+    _PYQT_VER = "PyQt5"
+    # PyQt5 使用 exec_()
+    def _app_exec(app):
+        return app.exec_()
+except ImportError as _e1:
+    _import_err = f"PyQt5: {_e1} | {_sip_info}"
+    # 2) 回退 PyQt6（部分新系统只有 PyQt6）
+    try:
+        from PyQt6.QtWidgets import (
+            QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+            QPushButton, QLabel, QComboBox, QLineEdit, QSpinBox, QTableWidget,
+            QFileDialog, QMessageBox, QHeaderView, QDialog, QListWidget,
+            QListWidgetItem, QGroupBox, QAbstractItemView, QTabWidget,
+            QRadioButton, QFormLayout, QTableWidgetItem, QGridLayout,
+        )
+        from PyQt6.QtCore import Qt, QSize, pyqtSignal
+        from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap
+        _PYQT_VER = "PyQt6"
+        # PyQt6 与 PyQt5 的兼容差异适配：exec_ → exec
+        def _app_exec(app):
+            return app.exec() if hasattr(app, "exec") else app.exec_()
+    except ImportError as _e2:
+        _import_err += f"; PyQt6: {_e2}"
+        sys.stderr.write(_install_hint_pyqt(_import_err))
+        sys.exit(1)
 
 try:
     import openpyxl
 except ImportError as e:
-    sys.stderr.write(
-        f"缺少 openpyxl（{e}）\n"
-        f"请运行：{sys.executable} -m pip install openpyxl\n"
-    )
+    os_name, arch, is_kylin = _detect_platform()
+    hint_lines = [f"缺少 openpyxl（{e}）"]
+    if is_kylin or (os_name == "linux" and arch in ("aarch64", "arm64", "loongarch64", "sw_64")):
+        hint_lines.append("【推荐】使用系统包管理器：")
+        hint_lines.append("  sudo apt install -y python3-openpyxl")
+        hint_lines.append("或使用 pip：")
+    hint_lines.append(f"  {sys.executable} -m pip install openpyxl")
+    sys.stderr.write("\n".join(hint_lines) + "\n")
     sys.exit(1)
+
+
+# ---------- PyQt5 / PyQt6 枚举兼容层 ----------
+# PyQt6 枚举都在各自的命名空间下，这里把 PyQt5 风格的扁平引用补到全局
+if _PYQT_VER == "PyQt6":
+    # Qt 命名空间
+    from PyQt6.QtCore import Qt as _QtNS
+    for _name in dir(_QtNS):
+        _obj = getattr(_QtNS, _name)
+        # 对枚举类，把其成员值挂到 Qt 顶层，模拟 PyQt5 行为
+        if isinstance(_obj, type) and issubclass(_obj, int):
+            for _mname, _mval in _obj.__members__.items():
+                if not hasattr(Qt, _mname):
+                    setattr(Qt, _mname, _mval)
+    # QDialog::DialogCode
+    for _mname, _mval in QDialog.DialogCode.__members__.items():
+        if not hasattr(QDialog, _mname):
+            setattr(QDialog, _mname, _mval)
+    # QHeaderView::ResizeMode
+    for _mname, _mval in QHeaderView.ResizeMode.__members__.items():
+        if not hasattr(QHeaderView, _mname):
+            setattr(QHeaderView, _mname, _mval)
+    # QAbstractItemView::SelectionMode / SelectionBehavior / EditTrigger
+    for _cls_attr in ("SelectionMode", "SelectionBehavior", "EditTrigger"):
+        if hasattr(QAbstractItemView, _cls_attr):
+            _ns = getattr(QAbstractItemView, _cls_attr)
+            if isinstance(_ns, type):
+                for _mname, _mval in _ns.__members__.items():
+                    if not hasattr(QAbstractItemView, _mname):
+                        setattr(QAbstractItemView, _mname, _mval)
+    # QTabWidget / QTabBar 相关
+    for _cls, _attrs in (
+        (QTabWidget, ("TabPosition",)),
+        (QTabBar if "QTabBar" in globals() else None, ()),
+    ):
+        if _cls is None:
+            continue
+        for _cls_attr in _attrs:
+            if hasattr(_cls, _cls_attr):
+                _ns = getattr(_cls, _cls_attr)
+                if isinstance(_ns, type):
+                    for _mname, _mval in _ns.__members__.items():
+                        if not hasattr(_cls, _mname):
+                            setattr(_cls, _mname, _mval)
 
 
 # ---------- 映射表格列定义 ----------
@@ -1482,7 +1637,7 @@ def main():
             break
     win = MainWindow()
     win.show()
-    sys.exit(app.exec_())
+    sys.exit(_app_exec(app))
 
 
 if __name__ == "__main__":
