@@ -46,28 +46,26 @@ jobs:
               pip3 install --upgrade pip
               # 纯 Python 依赖 + PyInstaller（自带 bootloader 源码，可本地编译）
               pip3 install -r requirements.txt
+              # 验证依赖
+              python3 -c "from PyQt5.QtWidgets import QApplication; import openpyxl; import xlrd; print(\"依赖OK\")"
               echo "==> PyInstaller version:"
-              pyinstaller --version
-              pyinstaller --onefile --windowed \
-                --name wps_table_mapper \
-                --hidden-import PyQt5.sip \
-                --log-level INFO \
-                wps_table_mapper.py
-              cp dist/wps_table_mapper /src/wps_table_mapper-arm64-kylin
-              chmod +x /src/wps_table_mapper-arm64-kylin
-              echo "==> Done. Binary size:"
-              ls -lh /src/wps_table_mapper-arm64-kylin
+              python3 -m PyInstaller --version
+              # 用 spec 文件打包（含 collect_all PyQt5 + excludes，与本地 build.sh 一致）
+              python3 -m PyInstaller wps_table_mapper.spec --clean --noconfirm
+              echo "==> Done. Output:"
+              ls -lh dist/
+              ls -lh "dist/WPS表格字段映射工具/"
             '
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wps_table_mapper-arm64-kylin
-          path: wps_table_mapper-arm64-kylin
+          name: WPS表格字段映射工具-arm64-kylin
+          path: dist/WPS表格字段映射工具/
           if-no-files-found: error
 
       - name: Create GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: wps_table_mapper-arm64-kylin
+          files: dist/WPS表格字段映射工具/
