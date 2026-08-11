@@ -495,7 +495,7 @@ class MainWindow(QMainWindow):
         exec_layout.setContentsMargins(14, 18, 14, 14)
 
         # 导出策略：橙色边框
-        self.btn_export = QPushButton("导出策略")
+        self.btn_export = QPushButton("导出配置")
         self.btn_export.setMinimumHeight(40)
         self.btn_export.setStyleSheet("""
             QPushButton {
@@ -524,7 +524,7 @@ class MainWindow(QMainWindow):
         exec_layout.addWidget(self.btn_export, 0, 0)
 
         # 导入策略：紫色边框
-        self.btn_import = QPushButton("导入策略")
+        self.btn_import = QPushButton("导入配置")
         self.btn_import.setMinimumHeight(40)
         self.btn_import.setStyleSheet("""
             QPushButton {
@@ -1027,6 +1027,9 @@ class MainWindow(QMainWindow):
             self.add_mapping_row(r)
 
     def add_mapping_row(self, row, default_method="直接复制", config=None):
+        # 导入配置时，用 config 中的 method 决定控件类型（否则合并/拆分的控件会建错）
+        if config and config.get("method"):
+            default_method = config["method"]
         # 填入方式
         mc = QComboBox()
         mc.addItems(["直接复制", "合并复制", "拆分复制"])
@@ -1064,10 +1067,12 @@ class MainWindow(QMainWindow):
         aw = QWidget()
         hl = QHBoxLayout(aw)
         hl.setContentsMargins(2, 2, 2, 2)
-        bplus = QPushButton("+")
-        bminus = QPushButton("-")
-        bplus.setFixedWidth(32)
-        bminus.setFixedWidth(32)
+        bplus = QPushButton("增行")
+        bminus = QPushButton("删行")
+        bplus.setFixedWidth(72)
+        bminus.setFixedWidth(72)
+        bplus.setStyleSheet("QPushButton { text-align: center; }")
+        bminus.setStyleSheet("QPushButton { text-align: center; }")
         bplus.clicked.connect(lambda _=None: self.on_plus())
         bminus.clicked.connect(lambda _=None: self.on_minus())
         hl.addWidget(bplus)
@@ -1127,17 +1132,17 @@ class MainWindow(QMainWindow):
         self.map_table.verticalHeader().setSectionsMovable(True)
         self.statusBar().showMessage("已按拖拽顺序调整映射行")
 
-    # ========== 策略导出 / 导入 ==========
+    # ========== 配置导出 / 导入 ==========
     def export_strategy(self):
-        """把当前所有映射行导出为 JSON 文件。"""
+        """把当前所有映射行及表头行设置导出为 JSON 文件。"""
         n = self.map_table.rowCount()
         if n == 0:
             QMessageBox.information(self, "提示", "当前没有可导出的映射行。")
             return
         default_dir = os.path.dirname(self.target_path or self.source_path or ".")
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出映射策略",
-            os.path.join(default_dir, "mapping_strategy.json"),
+            self, "导出配置",
+            os.path.join(default_dir, "mapping_config.json"),
             "JSON 文件 (*.json)"
         )
         if not path:
@@ -1145,9 +1150,11 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".json"):
             path += ".json"
         data = {
-            "version": 1,
+            "version": 2,
             "source_file": os.path.basename(self.source_path),
             "target_file": os.path.basename(self.target_path),
+            "source_header_row": self.spin_source_header.value(),
+            "target_header_row": self.spin_target_header.value(),
             "rules": [self.read_row_config(r) for r in range(n)],
         }
         try:
@@ -1155,17 +1162,17 @@ class MainWindow(QMainWindow):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             QMessageBox.information(
                 self, "完成",
-                f"已导出 {len(data['rules'])} 条映射策略至：\n{path}"
+                f"已导出 {len(data['rules'])} 条映射配置至：\n{path}"
             )
-            self.statusBar().showMessage(f"已导出策略：{os.path.basename(path)}")
+            self.statusBar().showMessage(f"已导出配置：{os.path.basename(path)}")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"导出失败：{e}")
 
     def import_strategy(self):
-        """从 JSON 文件导入映射策略并重建所有行。"""
+        """从 JSON 文件导入配置并重建所有行。"""
         default_dir = os.path.dirname(self.target_path or self.source_path or ".")
         path, _ = QFileDialog.getOpenFileName(
-            self, "导入映射策略", default_dir, "JSON 文件 (*.json)"
+            self, "导入配置", default_dir, "JSON 文件 (*.json)"
         )
         if not path:
             return
@@ -1173,12 +1180,19 @@ class MainWindow(QMainWindow):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"无法读取策略文件：{e}")
+            QMessageBox.critical(self, "错误", f"无法读取配置文件：{e}")
             return
         rules = data.get("rules") if isinstance(data, dict) else None
         if not isinstance(rules, list) or not rules:
-            QMessageBox.warning(self, "提示", "策略文件为空或格式不正确。")
+            QMessageBox.warning(self, "提示", "配置文件为空或格式不正确。")
             return
+
+        # 恢复表头行设置
+        if isinstance(data, dict):
+            if data.get("source_header_row"):
+                self.spin_source_header.setValue(data["source_header_row"])
+            if data.get("target_header_row"):
+                self.spin_target_header.setValue(data["target_header_row"])
 
         self.map_table.setRowCount(0)
         for i, cfg in enumerate(rules):
@@ -1187,9 +1201,9 @@ class MainWindow(QMainWindow):
         self.map_table.verticalHeader().setSectionsMovable(True)
         self._validate_imported_columns(rules)
         QMessageBox.information(
-            self, "完成", f"已导入 {len(rules)} 条映射策略。"
+            self, "完成", f"已导入 {len(rules)} 条映射配置。"
         )
-        self.statusBar().showMessage(f"已导入策略：{os.path.basename(path)}")
+        self.statusBar().showMessage(f"已导入配置：{os.path.basename(path)}")
 
     def _validate_imported_columns(self, rules):
         """导入后若当前表已加载，检查列名是否存在，缺失则提示。"""
