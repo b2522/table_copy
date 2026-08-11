@@ -474,6 +474,30 @@ class MainWindow(QMainWindow):
         self.spin_target_header.setAlignment(Qt.AlignCenter)
         self.spin_target_header.setFixedWidth(64)
         hr_row.addWidget(self.spin_target_header)
+        hr_row.addSpacing(20)
+        self.btn_auto_match = QPushButton("一键匹配相同表头")
+        self.btn_auto_match.setMinimumHeight(32)
+        self.btn_auto_match.setCursor(Qt.PointingHandCursor)
+        self.btn_auto_match.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                border: 2px solid #2563eb;
+                border-radius: 8px;
+                color: #1e40af;
+                font-weight: bold;
+                padding: 4px 14px;
+            }
+            QPushButton:hover {
+                background-color: #eff6ff;
+                border: 2px solid #1d4ed8;
+            }
+            QPushButton:pressed {
+                background-color: #dbeafe;
+                border: 2px solid #1e3a8a;
+            }
+        """)
+        self.btn_auto_match.clicked.connect(self._auto_match_headers)
+        hr_row.addWidget(self.btn_auto_match)
         hr_row.addStretch(1)
         up_layout.addLayout(hr_row)
 
@@ -638,6 +662,7 @@ class MainWindow(QMainWindow):
         _btn_font = QFont()
         _btn_font.setPointSize(10)
         for btn in (self.btn_export, self.btn_import, self.btn_copy,
+                    self.btn_auto_match,
                     self.btn_merge_run, self.btn_merge_save,
                     self.btn_load_source, self.btn_load_target,
                     self.btn_merge_add, self.btn_merge_remove):
@@ -1377,6 +1402,56 @@ class MainWindow(QMainWindow):
             sp = self.map_table.cellWidget(row, COL_SPLIT)
             if isinstance(sp, QSpinBox):
                 sp.setMaximum(max(1, self.target_col_count))
+
+    def _auto_match_headers(self):
+        """一键匹配源表和目标表中名称相同的表头，自动填入映射配置。"""
+        if not self.source_headers:
+            QMessageBox.warning(self, "提示", "请先上传源表格。")
+            return
+        if not self.target_headers:
+            QMessageBox.warning(self, "提示", "请先上传目标表格。")
+            return
+
+        # 找出两表共有的表头（按源表顺序）
+        matched = [h for h in self.source_headers if h in self.target_headers]
+        if not matched:
+            QMessageBox.information(self, "提示", "源表和目标表没有相同的表头，无法自动匹配。")
+            return
+
+        # 确认是否覆盖现有配置
+        has_content = False
+        for r in range(self.map_table.rowCount()):
+            if self.get_source_selection(r) or self.get_target_selection(r):
+                has_content = True
+                break
+        if has_content:
+            reply = QMessageBox.question(
+                self, "确认覆盖",
+                f"当前已有映射配置，将清空并填入 {len(matched)} 条自动匹配规则。\n是否继续？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # 清空现有行，重建为匹配结果
+        self.map_table.setRowCount(0)
+        for i, h in enumerate(matched):
+            self.map_table.insertRow(i)
+            self.add_mapping_row(i, config={
+                "method": "直接复制",
+                "src": h,
+                "tgt": h,
+                "sep": "-",
+                "split": 1,
+            })
+        self.map_table.verticalHeader().setSectionsMovable(True)
+
+        unmatched_src = [h for h in self.source_headers if h not in self.target_headers]
+        msg = f"已自动匹配 {len(matched)} 个相同表头。"
+        if unmatched_src:
+            msg += f"\n\n以下源列未在目标表中找到（需手动配置）：\n" + ", ".join(unmatched_src)
+        QMessageBox.information(self, "匹配完成", msg)
+        self.statusBar().showMessage(f"已自动匹配 {len(matched)} 个表头")
 
     def _clean_header(self, h, idx):
         if h is None or h == "":
