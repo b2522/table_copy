@@ -54,18 +54,17 @@ jobs:
               python3 -m PyInstaller wps_table_mapper.spec --clean --noconfirm
               echo "==> Done. Output:"
               ls -lh dist/
-              ls -lh "dist/WPS表格字段映射工具/"
             '
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: WPS表格字段映射工具-arm64-kylin
-          path: dist/WPS表格字段映射工具/
+          path: dist/WPS表格字段映射工具
           if-no-files-found: error
 
       - name: Create GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/WPS表格字段映射工具/
+          files: dist/WPS表格字段映射工具

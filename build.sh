@@ -36,7 +36,5 @@ echo "===== 开始打包 ====="
 python3 -m PyInstaller wps_table_mapper.spec --clean --noconfirm
 
 echo "===== 打包完成 ====="
-echo "输出目录: dist/WPS表格字段映射工具/"
-echo "可执行文件: dist/WPS表格字段映射工具/WPS表格字段映射工具"
-echo ""
-echo "如需在其他麒麟机器上运行，将整个 dist/WPS表格字段映射工具/ 文件夹拷贝过去即可。"
+echo "可执行文件: dist/WPS表格字段映射工具"
+echo "单文件模式，直接拷贝该文件到任意目录即可运行。"
