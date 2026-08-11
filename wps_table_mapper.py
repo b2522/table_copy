@@ -1150,9 +1150,9 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".json"):
             path += ".json"
         data = {
-            "version": 2,
-            "source_file": os.path.basename(self.source_path),
-            "target_file": os.path.basename(self.target_path),
+            "version": 3,
+            "source_path": self.source_path,
+            "target_path": self.target_path,
             "source_header_row": self.spin_source_header.value(),
             "target_header_row": self.spin_target_header.value(),
             "rules": [self.read_row_config(r) for r in range(n)],
@@ -1193,6 +1193,24 @@ class MainWindow(QMainWindow):
                 self.spin_source_header.setValue(data["source_header_row"])
             if data.get("target_header_row"):
                 self.spin_target_header.setValue(data["target_header_row"])
+
+        # 恢复源表格（路径存在则自动加载）
+        src_path = data.get("source_path", "") if isinstance(data, dict) else ""
+        if src_path and os.path.isfile(src_path):
+            self.source_path = src_path
+            self.lbl_source.setText(f"源文件：{os.path.basename(src_path)}")
+            self._apply_source_load()
+        elif src_path:
+            QMessageBox.warning(self, "提示", f"源表格文件不存在，已跳过：\n{src_path}")
+
+        # 恢复目标表格
+        tgt_path = data.get("target_path", "") if isinstance(data, dict) else ""
+        if tgt_path and os.path.isfile(tgt_path):
+            self.target_path = tgt_path
+            self.lbl_target.setText(f"目标文件：{os.path.basename(tgt_path)}")
+            self._apply_target_load()
+        elif tgt_path:
+            QMessageBox.warning(self, "提示", f"目标表格文件不存在，已跳过：\n{tgt_path}")
 
         self.map_table.setRowCount(0)
         for i, cfg in enumerate(rules):
