@@ -1628,6 +1628,19 @@ class MainWindow(QMainWindow):
             for c, h in enumerate(self.target_headers):
                 ws.cell(row=self.target_header_row, column=c + 1, value=h)
 
+        def safe_write(ws, row, col, value):
+            """安全写入单元格：若该单元格属于合并区域（非左上角），先解除合并再写入。"""
+            cell = ws.cell(row=row, column=col)
+            if hasattr(cell, 'value') and not isinstance(cell, openpyxl.cell.cell.MergedCell):
+                cell.value = value
+                return
+            # 该单元格是 MergedCell，找到所属合并区域并解除
+            for rng in list(ws.merged_cells.ranges):
+                if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
+                    ws.unmerge_cells(str(rng))
+                    break
+            ws.cell(row=row, column=col, value=value)
+
         n = len(self.source_data)
         for kind, a, b, c in rules:
             if kind == "direct":
@@ -1637,7 +1650,7 @@ class MainWindow(QMainWindow):
                 for i in range(n):
                     rowdata = self.source_data[i]
                     val = rowdata[scol] if scol < len(rowdata) else None
-                    ws.cell(row=data_start + i, column=tcol + 1, value=normalize(val))
+                    safe_write(ws, data_start + i, tcol + 1, normalize(val))
             elif kind == "merge":
                 src_list, tgt_name, sep = a, b, c
                 scols = [self.source_headers.index(s) for s in src_list]
@@ -1648,7 +1661,7 @@ class MainWindow(QMainWindow):
                     for cc in scols:
                         v = rowdata[cc] if cc < len(rowdata) else None
                         parts.append(str(normalize(v)) if v is not None else "")
-                    ws.cell(row=data_start + i, column=tcol + 1, value=sep.join(parts))
+                    safe_write(ws, data_start + i, tcol + 1, sep.join(parts))
             elif kind == "split":
                 src_name, tgt_cols, nn = a, b, c
                 scol = self.source_headers.index(src_name)
@@ -1658,7 +1671,7 @@ class MainWindow(QMainWindow):
                     s = str(normalize(v)) if v is not None else ""
                     for tname in tgt_cols:
                         tcol = self.target_headers.index(tname)
-                        ws.cell(row=data_start + i, column=tcol + 1, value=s)
+                        safe_write(ws, data_start + i, tcol + 1, s)
         wb.save(out)
 
 

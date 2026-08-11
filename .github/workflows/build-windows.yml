@@ -1,0 +1,54 @@
+name: Build Windows EXE (PyInstaller + Python 3.11)
+
+# 触发：打 v* 标签推送，或手动触发
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Windows 上 PyQt5 有预编译 wheel，直接 pip 安装
+          pip install PyQt5
+
+      - name: Verify dependencies
+        shell: pwsh
+        run: |
+          python -c "from PyQt5.QtWidgets import QApplication; import openpyxl; import xlrd; print('依赖OK')"
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller wps_table_mapper.spec --clean --noconfirm
+          Get-ChildItem dist/ | Format-Table Name, Length
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WPS表格字段映射工具-windows
+          path: dist/WPS表格字段映射工具.exe
+          if-no-files-found: error
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/WPS表格字段映射工具.exe
