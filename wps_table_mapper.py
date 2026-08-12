@@ -380,6 +380,8 @@ class MainWindow(QMainWindow):
         self.source_header_row = 1   # 表头所在行（1-based），兼容合并标题行
         self.target_header_row = 1
         self.source_data = []   # list[list]，不含表头
+        self.source_sheet_name = ""   # 当前源表子表名
+        self.target_sheet_name = ""   # 当前目标表子表名
 
         # 表格合并标签页状态
         self.merge_files = []            # 已添加的文件路径列表
@@ -443,8 +445,17 @@ class MainWindow(QMainWindow):
         self.btn_load_source.clicked.connect(self.load_source_file)
         self.lbl_source = QLabel("（未选择源文件）")
         self.lbl_source.setWordWrap(True)
+        self.lbl_source.setMinimumWidth(160)
+        self.combo_source_sheet = QComboBox()
+        self.combo_source_sheet.setEnabled(False)
+        self.combo_source_sheet.setMinimumWidth(350)
+        self.combo_source_sheet.setToolTip("选择源表中的子表（Sheet）")
+        self.combo_source_sheet.currentIndexChanged.connect(self._on_source_sheet_changed)
         src_row.addWidget(self.btn_load_source)
         src_row.addWidget(self.lbl_source, 1)
+        src_row.addSpacing(8)
+        src_row.addWidget(QLabel("子表:"))
+        src_row.addWidget(self.combo_source_sheet)
         up_layout.addLayout(src_row)
 
         tgt_row = QHBoxLayout()
@@ -452,8 +463,17 @@ class MainWindow(QMainWindow):
         self.btn_load_target.clicked.connect(self.load_target_file)
         self.lbl_target = QLabel("（未选择目标文件）")
         self.lbl_target.setWordWrap(True)
+        self.lbl_target.setMinimumWidth(160)
+        self.combo_target_sheet = QComboBox()
+        self.combo_target_sheet.setEnabled(False)
+        self.combo_target_sheet.setMinimumWidth(350)
+        self.combo_target_sheet.setToolTip("选择目标表中的子表（Sheet）")
+        self.combo_target_sheet.currentIndexChanged.connect(self._on_target_sheet_changed)
         tgt_row.addWidget(self.btn_load_target)
         tgt_row.addWidget(self.lbl_target, 1)
+        tgt_row.addSpacing(8)
+        tgt_row.addWidget(QLabel("子表:"))
+        tgt_row.addWidget(self.combo_target_sheet)
         up_layout.addLayout(tgt_row)
 
         # 表头起始行（兼容第一行是合并标题、真实表头在第2/3行的情况）
@@ -475,7 +495,7 @@ class MainWindow(QMainWindow):
         self.spin_target_header.setFixedWidth(64)
         hr_row.addWidget(self.spin_target_header)
         hr_row.addSpacing(20)
-        self.btn_auto_match = QPushButton("一键匹配相同表头")
+        self.btn_auto_match = QPushButton("一键匹配表头")
         self.btn_auto_match.setMinimumHeight(32)
         self.btn_auto_match.setCursor(Qt.PointingHandCursor)
         self.btn_auto_match.setStyleSheet("""
@@ -1178,6 +1198,8 @@ class MainWindow(QMainWindow):
             "version": 3,
             "source_path": self.source_path,
             "target_path": self.target_path,
+            "source_sheet": self.source_sheet_name,
+            "target_sheet": self.target_sheet_name,
             "source_header_row": self.spin_source_header.value(),
             "target_header_row": self.spin_target_header.value(),
             "rules": [self.read_row_config(r) for r in range(n)],
@@ -1221,18 +1243,28 @@ class MainWindow(QMainWindow):
 
         # 恢复源表格（路径存在则自动加载）
         src_path = data.get("source_path", "") if isinstance(data, dict) else ""
+        src_sheet = data.get("source_sheet", "") if isinstance(data, dict) else ""
         if src_path and os.path.isfile(src_path):
             self.source_path = src_path
             self.lbl_source.setText(f"源文件：{os.path.basename(src_path)}")
+            self._populate_source_sheets()
+            if src_sheet and self.combo_source_sheet.findText(src_sheet) >= 0:
+                self.combo_source_sheet.setCurrentText(src_sheet)
+                self.source_sheet_name = src_sheet
             self._apply_source_load()
         elif src_path:
             QMessageBox.warning(self, "提示", f"源表格文件不存在，已跳过：\n{src_path}")
 
         # 恢复目标表格
         tgt_path = data.get("target_path", "") if isinstance(data, dict) else ""
+        tgt_sheet = data.get("target_sheet", "") if isinstance(data, dict) else ""
         if tgt_path and os.path.isfile(tgt_path):
             self.target_path = tgt_path
             self.lbl_target.setText(f"目标文件：{os.path.basename(tgt_path)}")
+            self._populate_target_sheets()
+            if tgt_sheet and self.combo_target_sheet.findText(tgt_sheet) >= 0:
+                self.combo_target_sheet.setCurrentText(tgt_sheet)
+                self.target_sheet_name = tgt_sheet
             self._apply_target_load()
         elif tgt_path:
             QMessageBox.warning(self, "提示", f"目标表格文件不存在，已跳过：\n{tgt_path}")
@@ -1403,8 +1435,121 @@ class MainWindow(QMainWindow):
             if isinstance(sp, QSpinBox):
                 sp.setMaximum(max(1, self.target_col_count))
 
+    # ========== 模糊表头匹配 ==========
+    # 标准字段及其匹配规则
+    _STANDARD_FIELDS = ["姓名", "性别", "出生年月", "民族"]
+
+    @staticmethod
+    def _normalize_header(s):
+        """去除空格（全角/半角）、常见标点，统一小写用于匹配。"""
+        if not s:
+            return ""
+        s = str(s).strip().lower()
+        # 去掉全角空格、半角空格、常见标点
+        for ch in ("\u3000", " ", "\t", ".", "．", "、", "/", "\\", "-", "_",
+                   "（", "）", "(", ")", "[", "]", "【", "】", "：", ":"):
+            s = s.replace(ch, "")
+        return s
+
+    def _fuzzy_find_match(self, standard_field, headers):
+        """在给定的表头列表中，为标准字段找到最佳模糊匹配项。
+
+        返回 (best_header, score) 或 (None, 0)。
+        score 越大表示匹配度越高。
+        """
+        norm_headers = [(h, self._normalize_header(h)) for h in headers]
+        best = None
+        best_score = 0
+
+        if standard_field == "姓名":
+            for orig, norm in norm_headers:
+                if not norm:
+                    continue
+                score = 0
+                # 精确包含"姓名"
+                if "姓名" in norm:
+                    score = max(score, 100 - abs(len(norm) - 2) * 5)
+                # 同时包含"姓"和"名"（顺序不限）
+                if "姓" in norm and "名" in norm:
+                    score = max(score, 80 - abs(len(norm) - 2) * 5)
+                # 包含"名字"
+                if "名字" in norm:
+                    score = max(score, 70)
+                if score > best_score:
+                    best_score = score
+                    best = orig
+
+        elif standard_field == "性别":
+            for orig, norm in norm_headers:
+                if not norm:
+                    continue
+                score = 0
+                # 精确包含"性别"
+                if "性别" in norm:
+                    score = max(score, 100 - abs(len(norm) - 2) * 5)
+                # 同时包含"性"和"别"
+                if "性" in norm and "别" in norm:
+                    score = max(score, 80 - abs(len(norm) - 2) * 5)
+                # 英文/其他标识
+                if norm in ("sex", "gender"):
+                    score = max(score, 75)
+                if "男" in norm or "女" in norm:
+                    score = max(score, 60)
+                if "m/f" in norm or "m/f" in norm:
+                    score = max(score, 55)
+                if score > best_score:
+                    best_score = score
+                    best = orig
+
+        elif standard_field == "出生年月":
+            for orig, norm in norm_headers:
+                if not norm:
+                    continue
+                score = 0
+                # 包含"出生年月"
+                if "出生年月" in norm:
+                    score = max(score, 100 - abs(len(norm) - 4) * 5)
+                # 包含"出生" + "年月"
+                if "出生" in norm and ("年月" in norm or "年月日" in norm):
+                    score = max(score, 90 - abs(len(norm) - 4) * 3)
+                # 包含"出生" + "日期"
+                if "出生" in norm and "日期" in norm:
+                    score = max(score, 85)
+                # 包含"出生" + "时间"
+                if "出生" in norm and "时间" in norm:
+                    score = max(score, 80)
+                # 仅包含"出生"
+                if "出生" in norm:
+                    score = max(score, 50)
+                # 包含"年月"或"日期"或"时间"
+                if "年月" in norm or "日期" in norm or "时间" in norm:
+                    score = max(score, 40)
+                if score > best_score:
+                    best_score = score
+                    best = orig
+
+        elif standard_field == "民族":
+            for orig, norm in norm_headers:
+                if not norm:
+                    continue
+                score = 0
+                # 精确包含"民族"
+                if "民族" in norm:
+                    score = max(score, 100 - abs(len(norm) - 2) * 5)
+                # 同时包含"民"和"族"
+                if "民" in norm and "族" in norm:
+                    score = max(score, 80 - abs(len(norm) - 2) * 5)
+                # 包含"族别"
+                if "族别" in norm:
+                    score = max(score, 55)
+                if score > best_score:
+                    best_score = score
+                    best = orig
+
+        return (best, best_score) if best_score > 0 else (None, 0)
+
     def _auto_match_headers(self):
-        """一键匹配源表和目标表中名称相同的表头，自动填入映射配置。"""
+        """一键匹配表头：先模糊匹配标准字段，再精确匹配其余相同表头。"""
         if not self.source_headers:
             QMessageBox.warning(self, "提示", "请先上传源表格。")
             return
@@ -1412,10 +1557,42 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先上传目标表格。")
             return
 
-        # 找出两表共有的表头（按源表顺序）
-        matched = [h for h in self.source_headers if h in self.target_headers]
-        if not matched:
-            QMessageBox.information(self, "提示", "源表和目标表没有相同的表头，无法自动匹配。")
+        # ---- 第一阶段：模糊匹配标准字段 ----
+        fuzzy_matches = {}   # {标准字段: (源表头, 目标表头)}
+        used_src = set()
+        used_tgt = set()
+
+        for std_field in self._STANDARD_FIELDS:
+            src_match, src_score = self._fuzzy_find_match(std_field, self.source_headers)
+            tgt_match, tgt_score = self._fuzzy_find_match(std_field, self.target_headers)
+            if (src_match and tgt_match
+                    and src_match not in used_src and tgt_match not in used_tgt):
+                fuzzy_matches[std_field] = (src_match, tgt_match)
+                used_src.add(src_match)
+                used_tgt.add(tgt_match)
+
+        # ---- 第二阶段：精确匹配其余相同表头 ----
+        exact_matches = []
+        for h in self.source_headers:
+            if h in used_src:
+                continue
+            if h in self.target_headers and h not in used_tgt:
+                exact_matches.append(h)
+                used_src.add(h)
+                used_tgt.add(h)
+
+        # 汇总所有匹配
+        all_mappings = []
+        for std_field, (src_h, tgt_h) in fuzzy_matches.items():
+            all_mappings.append((src_h, tgt_h, f"模糊匹配「{std_field}」"))
+        for h in exact_matches:
+            all_mappings.append((h, h, "精确匹配"))
+
+        if not all_mappings:
+            QMessageBox.information(
+                self, "提示",
+                "源表和目标表没有可匹配的表头，无法自动匹配。"
+            )
             return
 
         # 确认是否覆盖现有配置
@@ -1427,7 +1604,7 @@ class MainWindow(QMainWindow):
         if has_content:
             reply = QMessageBox.question(
                 self, "确认覆盖",
-                f"当前已有映射配置，将清空并填入 {len(matched)} 条自动匹配规则。\n是否继续？",
+                f"当前已有映射配置，将清空并填入 {len(all_mappings)} 条自动匹配规则。\n是否继续？",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
             )
             if reply != QMessageBox.Yes:
@@ -1435,23 +1612,120 @@ class MainWindow(QMainWindow):
 
         # 清空现有行，重建为匹配结果
         self.map_table.setRowCount(0)
-        for i, h in enumerate(matched):
+        for i, (src_h, tgt_h, _) in enumerate(all_mappings):
             self.map_table.insertRow(i)
             self.add_mapping_row(i, config={
                 "method": "直接复制",
-                "src": h,
-                "tgt": h,
+                "src": src_h,
+                "tgt": tgt_h,
                 "sep": "-",
                 "split": 1,
             })
         self.map_table.verticalHeader().setSectionsMovable(True)
 
-        unmatched_src = [h for h in self.source_headers if h not in self.target_headers]
-        msg = f"已自动匹配 {len(matched)} 个相同表头。"
+        # 构建结果消息
+        msg_lines = [f"已自动匹配 {len(all_mappings)} 条表头映射："]
+        for src_h, tgt_h, method_desc in all_mappings:
+            msg_lines.append(f"  · {src_h}  →  {tgt_h}（{method_desc}）")
+
+        unmatched_src = [h for h in self.source_headers if h not in used_src]
         if unmatched_src:
-            msg += f"\n\n以下源列未在目标表中找到（需手动配置）：\n" + ", ".join(unmatched_src)
-        QMessageBox.information(self, "匹配完成", msg)
-        self.statusBar().showMessage(f"已自动匹配 {len(matched)} 个表头")
+            msg_lines.append(f"\n以下源列未匹配（需手动配置）：")
+            msg_lines.append("  " + ", ".join(unmatched_src))
+
+        QMessageBox.information(self, "匹配完成", "\n".join(msg_lines))
+        self.statusBar().showMessage(f"已自动匹配 {len(all_mappings)} 条表头映射")
+
+    # ========== 子表选择 ==========
+    def _populate_source_sheets(self):
+        """加载源文件后，填充子表下拉框。"""
+        path = self.source_path
+        if not path:
+            self.combo_source_sheet.clear()
+            self.combo_source_sheet.setEnabled(False)
+            self.source_sheet_name = ""
+            return
+        ext = path.lower()
+        try:
+            sheet_names = []
+            if ext.endswith((".xlsx", ".xlsm")):
+                wb = openpyxl.load_workbook(path, read_only=True)
+                sheet_names = wb.sheetnames
+                wb.close()
+            elif ext.endswith(".xls"):
+                try:
+                    import xlrd
+                    wb = xlrd.open_workbook(path)
+                    sheet_names = wb.sheet_names()
+                except ImportError:
+                    pass
+            if not sheet_names:
+                sheet_names = ["Sheet1"]
+        except Exception:
+            sheet_names = ["Sheet1"]
+
+        self.combo_source_sheet.blockSignals(True)
+        self.combo_source_sheet.clear()
+        self.combo_source_sheet.addItems(sheet_names)
+        self.combo_source_sheet.setEnabled(len(sheet_names) > 1)
+        self.source_sheet_name = sheet_names[0]
+        self.combo_source_sheet.setCurrentIndex(0)
+        self.combo_source_sheet.blockSignals(False)
+
+    def _populate_target_sheets(self):
+        """加载目标文件后，填充子表下拉框。"""
+        path = self.target_path
+        if not path:
+            self.combo_target_sheet.clear()
+            self.combo_target_sheet.setEnabled(False)
+            self.target_sheet_name = ""
+            return
+        ext = path.lower()
+        try:
+            sheet_names = []
+            if ext.endswith((".xlsx", ".xlsm")):
+                wb = openpyxl.load_workbook(path, read_only=True)
+                sheet_names = wb.sheetnames
+                wb.close()
+            elif ext.endswith(".xls"):
+                try:
+                    import xlrd
+                    wb = xlrd.open_workbook(path)
+                    sheet_names = wb.sheet_names()
+                except ImportError:
+                    pass
+            if not sheet_names:
+                sheet_names = ["Sheet1"]
+        except Exception:
+            sheet_names = ["Sheet1"]
+
+        self.combo_target_sheet.blockSignals(True)
+        self.combo_target_sheet.clear()
+        self.combo_target_sheet.addItems(sheet_names)
+        self.combo_target_sheet.setEnabled(len(sheet_names) > 1)
+        self.target_sheet_name = sheet_names[0]
+        self.combo_target_sheet.setCurrentIndex(0)
+        self.combo_target_sheet.blockSignals(False)
+
+    def _on_source_sheet_changed(self, index):
+        """源表子表切换时重新读取数据。"""
+        if index < 0 or not self.source_path:
+            return
+        sheet_name = self.combo_source_sheet.currentText()
+        if sheet_name == self.source_sheet_name:
+            return
+        self.source_sheet_name = sheet_name
+        self._apply_source_load()
+
+    def _on_target_sheet_changed(self, index):
+        """目标表子表切换时重新读取表头。"""
+        if index < 0 or not self.target_path:
+            return
+        sheet_name = self.combo_target_sheet.currentText()
+        if sheet_name == self.target_sheet_name:
+            return
+        self.target_sheet_name = sheet_name
+        self._apply_target_load()
 
     def _clean_header(self, h, idx):
         if h is None or h == "":
@@ -1476,14 +1750,17 @@ class MainWindow(QMainWindow):
             vals.append(v)
         return vals
 
-    def read_xls(self, path, header_row=1):
+    def read_xls(self, path, header_row=1, sheet_name=None):
         """用 xlrd 读取 .xls（按指定表头行读取表头+数据，日期以浮点返回）。"""
         try:
             import xlrd
         except ImportError:
             raise ImportError("读取 .xls 需要 xlrd，请运行: pip install xlrd")
         wb = xlrd.open_workbook(path)
-        ws = wb.sheet_by_index(0)
+        if sheet_name and sheet_name in wb.sheet_names():
+            ws = wb.sheet_by_name(sheet_name)
+        else:
+            ws = wb.sheet_by_index(0)
         # 合并区域映射：(行,列)->左上角值
         merge_val = {}
         for (rlo, rhi, clo, chi) in ws.merged_cells:
@@ -1518,6 +1795,7 @@ class MainWindow(QMainWindow):
             return
         self.source_path = path
         self.lbl_source.setText(f"源文件：{os.path.basename(path)}")
+        self._populate_source_sheets()
         self._apply_source_load()
 
     def _apply_source_load(self):
@@ -1530,7 +1808,7 @@ class MainWindow(QMainWindow):
         try:
             if ext.endswith((".xlsx", ".xlsm")):
                 wb = openpyxl.load_workbook(path, data_only=True)
-                ws = wb.active
+                ws = wb[self.source_sheet_name] if self.source_sheet_name else wb.active
                 max_row = ws.max_row
                 max_col = ws.max_column
                 if hr < 1 or hr > max_row:
@@ -1538,6 +1816,7 @@ class MainWindow(QMainWindow):
                         self, "表头行错误",
                         f"源表表头行 {hr} 超出范围（共 {max_row} 行）。"
                     )
+                    wb.close()
                     return
                 raw = self._merged_row_values(ws, hr, max_col)
                 headers = [self._clean_header(c, i) for i, c in enumerate(raw)]
@@ -1545,8 +1824,9 @@ class MainWindow(QMainWindow):
                     list(r)
                     for r in ws.iter_rows(min_row=hr + 1, values_only=True)
                 ]
+                wb.close()
             elif ext.endswith(".xls"):
-                headers, data, _ = self.read_xls(path, hr)
+                headers, data, _ = self.read_xls(path, hr, self.source_sheet_name)
             else:
                 QMessageBox.warning(self, "格式错误", "不支持的文件格式。")
                 return
@@ -1574,6 +1854,7 @@ class MainWindow(QMainWindow):
             return
         self.target_path = path
         self.lbl_target.setText(f"目标文件：{os.path.basename(path)}")
+        self._populate_target_sheets()
         self._apply_target_load()
 
     def _apply_target_load(self):
@@ -1586,21 +1867,23 @@ class MainWindow(QMainWindow):
         try:
             if ext.endswith((".xlsx", ".xlsm")):
                 wb = openpyxl.load_workbook(path)  # 保留格式/公式
-                ws = wb.active
+                ws = wb[self.target_sheet_name] if self.target_sheet_name else wb.active
                 max_row = ws.max_row
                 if hr < 1 or hr > max_row:
                     QMessageBox.warning(
                         self, "表头行错误",
                         f"目标表表头行 {hr} 超出范围（共 {max_row} 行）。"
                     )
+                    wb.close()
                     return
                 raw = self._merged_row_values(ws, hr, ws.max_column)
                 self.target_headers = [self._clean_header(h, c) for c, h in enumerate(raw)]
                 self.statusBar().showMessage(
                     f"目标表表头共 {len(self.target_headers)} 列（表头第 {hr} 行）"
                 )
+                wb.close()
             elif ext.endswith(".xls"):
-                headers, _, _ = self.read_xls(path, hr)
+                headers, _, _ = self.read_xls(path, hr, self.target_sheet_name)
                 self.target_headers = [self._clean_header(h, c) for c, h in enumerate(headers)]
                 QMessageBox.information(
                     self, "提示",
@@ -1695,7 +1978,7 @@ class MainWindow(QMainWindow):
         data_start = self.target_header_row + 1   # 数据从表头行的下一行开始
         if self.target_path and self.target_path.lower().endswith((".xlsx", ".xlsm")):
             wb = openpyxl.load_workbook(self.target_path)
-            ws = wb.active
+            ws = wb[self.target_sheet_name] if self.target_sheet_name else wb.active
         else:
             wb = openpyxl.Workbook()
             ws = wb.active
