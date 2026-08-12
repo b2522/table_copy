@@ -1,0 +1,44 @@
+{
+  "version": 3,
+  "source_path": "D:/Users/b2522/Documents/codex_projects/table_copy/复制演示--源文件.xlsx",
+  "target_path": "D:/Users/b2522/Documents/codex_projects/table_copy/复制演示--目标文件.xlsx",
+  "source_header_row": 2,
+  "target_header_row": 2,
+  "rules": [
+    {
+      "method": "直接复制",
+      "src": "姓名",
+      "tgt": "姓名",
+      "sep": "-",
+      "split": 1
+    },
+    {
+      "method": "直接复制",
+      "src": "部门",
+      "tgt": "部门",
+      "sep": "-",
+      "split": 1
+    },
+    {
+      "method": "直接复制",
+      "src": "工号",
+      "tgt": "工号",
+      "sep": "-",
+      "split": 1
+    },
+    {
+      "method": "直接复制",
+      "src": "地区",
+      "tgt": "地区",
+      "sep": "-",
+      "split": 1
+    },
+    {
+      "method": "直接复制",
+      "src": "",
+      "tgt": "",
+      "sep": "-",
+      "split": 2
+    }
+  ]
+}
