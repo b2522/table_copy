@@ -8,9 +8,12 @@ set -e
 echo "===== 检查 Python3 ====="
 python3 --version
 
-echo "===== 安装系统依赖（PyQt5 + PyInstaller 走 apt，避免 ARM64 无预编译 wheel）====="
+echo "===== 安装系统依赖（PyQt5 走 apt，避免 ARM64 无预编译 wheel）====="
 sudo apt update
-sudo apt install -y python3-pyqt5 python3-openpyxl python3-xlrd python3-pyinstaller
+sudo apt install -y python3-pyqt5 python3-openpyxl python3-xlrd
+
+echo "===== 安装打包工具（PyPI 有 aarch64 wheel）====="
+pip3 install pyinstaller
 
 echo "===== 验证依赖 ====="
 python3 -c "from PyQt5.QtWidgets import QApplication; import openpyxl; import xlrd; print('依赖OK')"
