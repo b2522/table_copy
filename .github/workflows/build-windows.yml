@@ -26,19 +26,30 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Windows 上 PyQt5 有预编译 wheel，直接 pip 安装
           pip install PyQt5
 
       - name: Verify dependencies
         shell: pwsh
         run: |
-          python -c "from PyQt5.QtWidgets import QApplication; import openpyxl; import xlrd; print('依赖OK')"
+          python -c "from PyQt5.QtWidgets import QApplication; import openpyxl; import xlrd; print('Dependencies OK')"
 
       - name: Build with PyInstaller
         shell: pwsh
         run: |
           python -m PyInstaller wps_table_mapper.spec --clean --noconfirm
           Get-ChildItem dist/ | Format-Table Name, Length
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $exePath = "dist/WPS表格字段映射工具.exe"
+          if (Test-Path $exePath) {
+            $size = (Get-Item $exePath).Length / 1MB
+            Write-Host "Build successful: $exePath ($([math]::Round($size, 2)) MB)"
+          } else {
+            Write-Error "EXE not found at $exePath"
+            exit 1
+          }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

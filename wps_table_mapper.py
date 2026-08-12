@@ -1493,9 +1493,9 @@ class MainWindow(QMainWindow):
                 # 英文/其他标识
                 if norm in ("sex", "gender"):
                     score = max(score, 75)
-                if "男" in norm or "女" in norm:
+                if "m/f" in norm or "mf" in norm:
                     score = max(score, 60)
-                if "m/f" in norm or "m/f" in norm:
+                if "男" in norm or "女" in norm:
                     score = max(score, 55)
                 if score > best_score:
                     best_score = score

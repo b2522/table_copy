@@ -2,5 +2,5 @@
 # 注意：PyQt5 不在 pip 安装 —— PyPI 无 Linux ARM64 的 wheel，
 # 必须在 ARM64 容器内用 apt 安装系统级 python3-pyqt5（见 workflow）。
 openpyxl>=3.0
-xlrd>=1.2
+xlrd>=1.2,<2.0
 pyinstaller>=6.0
