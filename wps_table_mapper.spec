@@ -1,22 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file — WPS表格字段映射工具
+"""PyInstaller spec 文件 —— WPS表格字段映射工具
 在麒麟 Linux 上运行：pyinstaller wps_table_mapper.spec --clean --noconfirm
 或直接执行 ./build.sh
 """
 
-import sys
-import os
+from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
 
-# 尝试收集 PyQt5 所有组件（若失败则回退到手动 hiddenimports）
-try:
-    from PyInstaller.utils.hooks import collect_all
-    pyqt5_datas, pyqt5_binaries, pyqt5_hidden = collect_all('PyQt5')
-except Exception:
-    pyqt5_datas, pyqt5_binaries, pyqt5_hidden = [], [], [
-        'PyQt5', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets', 'PyQt5.sip',
-    ]
+# 完整收集 PyQt5 的所有数据/二进制/隐藏导入（含 Qt 平台插件，防止运行时报错）
+pyqt5_datas, pyqt5_binaries, pyqt5_hidden = collect_all('PyQt5')
 
 a = Analysis(
     ['wps_table_mapper.py'],
@@ -26,6 +19,11 @@ a = Analysis(
     hiddenimports=pyqt5_hidden + [
         'xlrd',
         'openpyxl',
+        'PyQt5',
+        'PyQt5.QtCore',
+        'PyQt5.QtGui',
+        'PyQt5.QtWidgets',
+        'PyQt5.sip',
     ],
     hookspath=[],
     hooksconfig={},
@@ -60,9 +58,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,
+    upx=True,
     upx_exclude=[],
-    runtime_tmpdir=None,
     console=False,
     icon=None,
 )

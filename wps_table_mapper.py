@@ -135,7 +135,7 @@ try:
         QListWidgetItem, QGroupBox, QAbstractItemView, QTabWidget,
         QRadioButton, QFormLayout, QTableWidgetItem, QGridLayout,
     )
-    from PyQt5.QtCore import Qt, QSize, pyqtSignal
+    from PyQt5.QtCore import Qt, QSize, pyqtSignal, QTimer
     from PyQt5.QtGui import QFont, QColor, QIcon, QPixmap
     _PYQT_VER = "PyQt5"
     # PyQt5 使用 exec_()
@@ -152,7 +152,7 @@ except ImportError as _e1:
             QListWidgetItem, QGroupBox, QAbstractItemView, QTabWidget,
             QRadioButton, QFormLayout, QTableWidgetItem, QGridLayout,
         )
-        from PyQt6.QtCore import Qt, QSize, pyqtSignal
+        from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer
         from PyQt6.QtGui import QFont, QColor, QIcon, QPixmap
         _PYQT_VER = "PyQt6"
         # PyQt6 与 PyQt5 的兼容差异适配：exec_ → exec
@@ -222,17 +222,19 @@ if _PYQT_VER == "PyQt6":
 
 
 # ---------- 映射表格列定义 ----------
-COL_METHOD = 0   # 填入方式
-COL_SOURCE = 1   # 源列
-COL_TARGET = 2   # 目标列
-COL_SEP    = 3   # 连接符（合并复制用）
-COL_SPLIT  = 4   # 拆分数（拆分复制用）
-COL_ACTION = 5   # 操作（+ / -）
+COL_SRCTBL = 0  # 源表选择（多源表格时选择数据来自哪个源表）
+COL_METHOD = 1  # 填入方式
+COL_SOURCE = 2  # 源列
+COL_TARGET = 3  # 目标列
+COL_SEP    = 4  # 连接符（合并复制用）
+COL_SPLIT  = 5  # 拆分数（拆分复制用）
+COL_ACTION = 6  # 操作（+ / -）
+MAP_COL_COUNT = 7  # 映射表总列数
 
 
 # ---------- 可拖拽行排序的表格 ----------
 class MappingTable(QTableWidget):
-    """通过左侧行号表头拖拽整行重排序；拖动完成后发出新行顺序信号。"""
+    """通过左侧行号表头拖拽整行重排序；点击单元格内的 QComboBox 任意区域即可展开下拉。"""
     rowReorderRequested = pyqtSignal(list)  # 新的行顺序（逻辑行索引列表）
 
     def __init__(self, parent=None):
@@ -244,6 +246,20 @@ class MappingTable(QTableWidget):
         vh.setDragEnabled(True)
         vh.setMinimumWidth(40)          # 加宽行号，方便抓取
         vh.sectionMoved.connect(self._on_section_moved)
+
+    def mousePressEvent(self, event):
+        """点击单元格内 QComboBox 的任意区域（包含文本部分）都直接展开下拉。"""
+        if event.button() == Qt.LeftButton:
+            pos = event.pos()
+            idx = self.indexAt(pos)
+            if idx.isValid():
+                w = self.cellWidget(idx.row(), idx.column())
+                if isinstance(w, QComboBox):
+                    # 稍微延迟触发，避免默认行为覆盖
+                    QTimer.singleShot(0, w.showPopup)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
 
     def _on_section_moved(self, logicalIndex, oldVisualIndex, newVisualIndex):
         n = self.rowCount()
@@ -380,8 +396,15 @@ class MainWindow(QMainWindow):
         self.source_header_row = 1   # 表头所在行（1-based），兼容合并标题行
         self.target_header_row = 1
         self.source_data = []   # list[list]，不含表头
-        self.source_sheet_name = ""   # 当前源表子表名
+        self.source_sheet_name = ""   # 当前源表子表名（主源表，向后兼容）
         self.target_sheet_name = ""   # 当前目标表子表名
+
+        # ---- 多源表格管理 ----
+        # self.sources: list[dict]，每项 = {path, sheet, headers, data, header_row, label}
+        # self.source_widgets: list[dict]，每项 = {row_widget, btn_load, lbl_name, combo_sheet, btn_del}
+        self.sources = []
+        self.source_widgets = []
+        self.MAX_SOURCES = 5
 
         # 表格合并标签页状态
         self.merge_files = []            # 已添加的文件路径列表
@@ -404,7 +427,7 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1200, 820)
 
         self._build_ui()
-        self._init_mapping(20)
+        self._init_mapping(10)
         self.statusBar().showMessage("就绪：请先上传源表格与目标表格")
 
     # ========== UI 构建 ==========
@@ -439,196 +462,207 @@ class MainWindow(QMainWindow):
         # ---- 文件上传区 ----
         up_group = QGroupBox("文件上传")
         up_layout = QVBoxLayout(up_group)
+        up_layout.setSpacing(8)
+        up_layout.setContentsMargins(10, 12, 10, 10)
 
-        src_row = QHBoxLayout()
-        self.btn_load_source = QPushButton("上传 WPS 源表格 (.xlsx/.xls)")
-        self.btn_load_source.clicked.connect(self.load_source_file)
-        self.lbl_source = QLabel("（未选择源文件）")
-        self.lbl_source.setWordWrap(True)
-        self.lbl_source.setMinimumWidth(160)
-        self.combo_source_sheet = QComboBox()
-        self.combo_source_sheet.setEnabled(False)
-        self.combo_source_sheet.setMinimumWidth(350)
-        self.combo_source_sheet.setToolTip("选择源表中的子表（Sheet）")
-        self.combo_source_sheet.currentIndexChanged.connect(self._on_source_sheet_changed)
-        src_row.addWidget(self.btn_load_source)
-        src_row.addWidget(self.lbl_source, 1)
-        src_row.addSpacing(8)
-        src_row.addWidget(QLabel("子表:"))
-        src_row.addWidget(self.combo_source_sheet)
-        up_layout.addLayout(src_row)
+        # ---- 源表格管理区（支持多个源表，最多5个）----
+        src_label_row = QHBoxLayout()
+        src_lbl = QLabel("源表格（最多 5 个）：")
+        # 固定宽度：上传按钮(120) + 间距(8) + 文件名(340) + 间距(8)，使"添加源表格"与下方"子表:"左对齐
+        src_lbl.setFixedWidth(640)
+        src_label_row.addWidget(src_lbl)
+        self.btn_add_source = QPushButton("+ 添加源表格")
+        self.btn_add_source.setMinimumWidth(120)
+        self.btn_add_source.setMinimumHeight(32)
+        self.btn_add_source.setCursor(Qt.PointingHandCursor)
+        self.btn_add_source.setStyleSheet("""
+            QPushButton {
+                background-color: #eff6ff;
+                border: 1px solid #2563eb;
+                border-radius: 6px;
+                color: #1e40af;
+                font-weight: bold;
+                padding: 4px 12px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #dbeafe;
+                border: 1px solid #1d4ed8;
+            }
+            QPushButton:pressed {
+                background-color: #bfdbfe;
+            }
+            QPushButton:disabled {
+                background-color: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        self.btn_add_source.clicked.connect(self._add_source_row)
+        src_label_row.addWidget(self.btn_add_source)
+        src_label_row.addStretch(1)
+        up_layout.addLayout(src_label_row)
 
+        # 源表行容器
+        self.src_container = QVBoxLayout()
+        self.src_container.setSpacing(4)
+        up_layout.addLayout(self.src_container)
+
+        # 初始创建第一个源表行（主源表，不可删除）
+        self._add_source_row(primary=True)
+
+        # ---- 目标表格上传行 ----
         tgt_row = QHBoxLayout()
-        self.btn_load_target = QPushButton("上传 WPS 目标表格 (.xlsx/.xls)")
+        tgt_row.setSpacing(8)
+        self.btn_load_target = QPushButton("上传目标表格")
+        self.btn_load_target.setMinimumWidth(120)
+        self.btn_load_target.setMinimumHeight(36)
+        self.btn_load_target.setStyleSheet("""
+            QPushButton {
+                background-color: #fef3c7;
+                border: 1px solid #d97706;
+                border-radius: 6px;
+                color: #92400e;
+                font-weight: bold;
+                padding: 4px 14px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #fde68a;
+                border: 1px solid #b45309;
+            }
+            QPushButton:pressed {
+                background-color: #fcd34d;
+            }
+        """)
         self.btn_load_target.clicked.connect(self.load_target_file)
         self.lbl_target = QLabel("（未选择目标文件）")
-        self.lbl_target.setWordWrap(True)
-        self.lbl_target.setMinimumWidth(160)
+        self.lbl_target.setWordWrap(False)
+        self.lbl_target.setFixedWidth(440)
+        tgt_row.addWidget(self.btn_load_target)
+        tgt_row.addWidget(self.lbl_target)
+        tgt_row.addWidget(QLabel("子表:"))
         self.combo_target_sheet = QComboBox()
         self.combo_target_sheet.setEnabled(False)
-        self.combo_target_sheet.setMinimumWidth(350)
+        self.combo_target_sheet.setMinimumWidth(200)   # 10 个汉字宽度
         self.combo_target_sheet.setToolTip("选择目标表中的子表（Sheet）")
         self.combo_target_sheet.currentIndexChanged.connect(self._on_target_sheet_changed)
-        tgt_row.addWidget(self.btn_load_target)
-        tgt_row.addWidget(self.lbl_target, 1)
-        tgt_row.addSpacing(8)
-        tgt_row.addWidget(QLabel("子表:"))
         tgt_row.addWidget(self.combo_target_sheet)
-        up_layout.addLayout(tgt_row)
-
-        # 表头起始行（兼容第一行是合并标题、真实表头在第2/3行的情况）
-        hr_row = QHBoxLayout()
-        hr_row.addWidget(QLabel("源表表头行:"))
-        self.spin_source_header = QSpinBox()
-        self.spin_source_header.setMinimum(1)
-        self.spin_source_header.setMaximum(50)
-        self.spin_source_header.setValue(1)
-        self.spin_source_header.setAlignment(Qt.AlignCenter)
-        self.spin_source_header.setFixedWidth(64)
-        hr_row.addWidget(self.spin_source_header)
-        hr_row.addWidget(QLabel("目标表表头行:"))
+        tgt_row.addSpacing(12)
+        tgt_row.addWidget(QLabel("表头行:"))
         self.spin_target_header = QSpinBox()
         self.spin_target_header.setMinimum(1)
         self.spin_target_header.setMaximum(50)
         self.spin_target_header.setValue(1)
         self.spin_target_header.setAlignment(Qt.AlignCenter)
-        self.spin_target_header.setFixedWidth(64)
-        hr_row.addWidget(self.spin_target_header)
-        hr_row.addSpacing(20)
-        self.btn_auto_match = QPushButton("一键匹配表头")
-        self.btn_auto_match.setMinimumHeight(32)
-        self.btn_auto_match.setCursor(Qt.PointingHandCursor)
-        self.btn_auto_match.setStyleSheet("""
-            QPushButton {
-                background-color: transparent;
-                border: 2px solid #2563eb;
-                border-radius: 8px;
-                color: #1e40af;
-                font-weight: bold;
-                padding: 4px 14px;
-            }
-            QPushButton:hover {
-                background-color: #eff6ff;
-                border: 2px solid #1d4ed8;
-            }
-            QPushButton:pressed {
-                background-color: #dbeafe;
-                border: 2px solid #1e3a8a;
-            }
-        """)
-        self.btn_auto_match.clicked.connect(self._auto_match_headers)
-        hr_row.addWidget(self.btn_auto_match)
-        hr_row.addStretch(1)
-        up_layout.addLayout(hr_row)
-
-        # 修改表头行后，若已加载文件则按新行重新读取
-        self.spin_source_header.valueChanged.connect(
-            lambda: self._apply_source_load() if getattr(self, "source_path", None) else None
-        )
+        self.spin_target_header.setMinimumWidth(90)
+        self.spin_target_header.setPrefix("第 ")
+        self.spin_target_header.setSuffix(" 行")
         self.spin_target_header.valueChanged.connect(
             lambda: self._apply_target_load() if getattr(self, "target_path", None) else None
         )
+        tgt_row.addWidget(self.spin_target_header)
+        tgt_row.addStretch(1)
+        up_layout.addLayout(tgt_row)
 
         top_row.addWidget(up_group, 7)  # 文件上传区占 70%
 
-        # ---- 操作按钮区（右侧，2 列网格：导出/导入一列，整表复制单独一列）----
+        # ---- 操作按钮区（右侧，2 列网格）----
         exec_panel = QGroupBox("操作")
         exec_layout = QGridLayout(exec_panel)
-        exec_layout.setHorizontalSpacing(10)
-        exec_layout.setVerticalSpacing(10)
+        exec_layout.setHorizontalSpacing(12)
+        exec_layout.setVerticalSpacing(12)
         exec_layout.setContentsMargins(14, 18, 14, 14)
 
-        # 导出策略：橙色边框
+        # 导出配置：橙色主题
         self.btn_export = QPushButton("导出配置")
-        self.btn_export.setMinimumHeight(40)
+        self.btn_export.setMinimumHeight(44)
         self.btn_export.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
-                border: 2px solid #ea580c;
-                border-radius: 10px;
+                background-color: #fff7ed;
+                border: 1px solid #ea580c;
+                border-radius: 8px;
                 color: #9a3412;
                 font-weight: bold;
                 padding: 6px 14px;
             }
             QPushButton:hover {
-                background-color: #fff7ed;
-                border: 2px solid #c2410c;
+                background-color: #ffedd5;
+                border: 1px solid #c2410c;
             }
             QPushButton:pressed {
-                background-color: #ffedd5;
-                border: 2px solid #7c2d12;
+                background-color: #fed7aa;
             }
             QPushButton:disabled {
-                background-color: transparent;
-                border: 2px solid #c0c4cc;
-                color: #999;
+                background-color: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
             }
         """)
         self.btn_export.clicked.connect(self.export_strategy)
         exec_layout.addWidget(self.btn_export, 0, 0)
 
-        # 导入策略：紫色边框
+        # 导入配置：紫色主题
         self.btn_import = QPushButton("导入配置")
-        self.btn_import.setMinimumHeight(40)
+        self.btn_import.setMinimumHeight(44)
         self.btn_import.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
-                border: 2px solid #8b5cf6;
-                border-radius: 10px;
+                background-color: #f5f3ff;
+                border: 1px solid #8b5cf6;
+                border-radius: 8px;
                 color: #5b21b6;
                 font-weight: bold;
                 padding: 6px 14px;
             }
             QPushButton:hover {
-                background-color: #f5f3ff;
-                border: 2px solid #7c3aed;
+                background-color: #ede9fe;
+                border: 1px solid #7c3aed;
             }
             QPushButton:pressed {
-                background-color: #ede9fe;
-                border: 2px solid #4c1d95;
+                background-color: #ddd6fe;
             }
             QPushButton:disabled {
-                background-color: transparent;
-                border: 2px solid #c0c4cc;
-                color: #999;
+                background-color: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
             }
         """)
         self.btn_import.clicked.connect(self.import_strategy)
         exec_layout.addWidget(self.btn_import, 1, 0)
 
-        # 整表复制：绿色边框（执行类操作，单独一列，跨两行）
+        # 整表复制：绿色主题
         self.btn_copy = QPushButton("整表复制")
-        self.btn_copy.setMinimumHeight(90)
+        self.btn_copy.setMinimumHeight(96)
         self.btn_copy.setStyleSheet("""
             QPushButton {
-                background-color: transparent;
-                border: 2px solid #16a34a;
+                background-color: #ecfdf5;
+                border: 2px solid #10b981;
                 border-radius: 10px;
-                color: #166534;
+                color: #065f46;
                 font-weight: bold;
                 padding: 8px 14px;
+
             }
             QPushButton:hover {
-                background-color: #f0fdf4;
-                border: 2px solid #15803d;
+                background-color: #d1fae5;
+                border: 2px solid #059669;
             }
             QPushButton:pressed {
-                background-color: #dcfce7;
-                border: 2px solid #14532d;
+                background-color: #a7f3d0;
+                border: 2px solid #047857;
             }
             QPushButton:disabled {
-                background-color: transparent;
-                border: 2px solid #c0c4cc;
-                color: #999;
+                background-color: #f3f4f6;
+                border: 2px solid #d1d5db;
+                color: #9ca3af;
             }
         """)
         self.btn_copy.clicked.connect(self.do_copy)
-        exec_layout.addWidget(self.btn_copy, 0, 1, 2, 1)  # 第 1 列，跨 2 行
+        exec_layout.addWidget(self.btn_copy, 0, 1, 2, 1)
 
-        # 设置列拉伸：第 0 列自适应，第 1 列也自适应
+        # 设置列拉伸
         exec_layout.setColumnStretch(0, 1)
         exec_layout.setColumnStretch(1, 1)
-        # 设置行拉伸均分
         exec_layout.setRowStretch(0, 1)
         exec_layout.setRowStretch(1, 1)
 
@@ -641,9 +675,9 @@ class MainWindow(QMainWindow):
         map_layout = QVBoxLayout(map_group)
 
         self.map_table = MappingTable()
-        self.map_table.setColumnCount(6)
+        self.map_table.setColumnCount(MAP_COL_COUNT)
         self.map_table.setHorizontalHeaderLabels(
-            ["填入方式", "源列", "目标列", "连接符", "拆分数", "操作"]
+            ["源表", "填入方式", "源列", "目标列", "连接符", "拆分数", "操作"]
         )
         hdr = self.map_table.horizontalHeader()
         hdr.setSectionResizeMode(QHeaderView.Stretch)
@@ -682,7 +716,6 @@ class MainWindow(QMainWindow):
         _btn_font = QFont()
         _btn_font.setPointSize(10)
         for btn in (self.btn_export, self.btn_import, self.btn_copy,
-                    self.btn_auto_match,
                     self.btn_merge_run, self.btn_merge_save,
                     self.btn_load_source, self.btn_load_target,
                     self.btn_merge_add, self.btn_merge_remove):
@@ -1065,6 +1098,441 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "保存失败", f"无法保存文件：{e}")
 
+    # ========== 多源表格管理 ==========
+    def _add_source_row(self, primary=False):
+        """添加一个源表行（UI + 状态）。primary=True 时为主源表（不可删除）。"""
+        if len(self.sources) >= self.MAX_SOURCES:
+            QMessageBox.information(self, "提示", f"最多支持 {self.MAX_SOURCES} 个源表格。")
+            return
+        idx = len(self.sources)
+
+        # ---- UI 行 ----
+        row_widget = QWidget()
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(4, 4, 4, 4)
+        row_layout.setSpacing(8)
+
+        # 上传按钮（带浅蓝底色），宽度与"上传目标表格"一致
+        btn_load = QPushButton(f"上传源表格{idx + 1}")
+        btn_load.setMinimumWidth(120)
+        btn_load.setMinimumHeight(36)
+        btn_load.setStyleSheet("""
+            QPushButton {
+                background-color: #eff6ff;
+                border: 1px solid #2563eb;
+                border-radius: 6px;
+                color: #1e40af;
+                font-weight: bold;
+                padding: 4px 12px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #dbeafe;
+                border: 1px solid #1d4ed8;
+            }
+            QPushButton:pressed {
+                background-color: #bfdbfe;
+            }
+        """)
+        row_layout.addWidget(btn_load)
+
+        # 文件名（固定宽度，确保所有行的子表下拉框左对齐）
+        lbl_name = QLabel("（未选择）")
+        lbl_name.setWordWrap(False)
+        lbl_name.setFixedWidth(450)
+        row_layout.addWidget(lbl_name)
+
+        # 子表选择（10 个汉字宽度）
+        lbl_sheet = QLabel("子表:")
+        row_layout.addWidget(lbl_sheet)
+        combo_sheet = QComboBox()
+        combo_sheet.setEnabled(False)
+        combo_sheet.setMinimumWidth(200)   # 10 个汉字宽度
+        combo_sheet.setToolTip("选择子表（Sheet）")
+        row_layout.addWidget(combo_sheet)
+        row_layout.addSpacing(12)   # 子表后预留空间
+
+        # 表头行（显示"第 N 行"格式，5 个汉字宽度）
+        lbl_hr = QLabel("表头行:")
+        row_layout.addWidget(lbl_hr)
+        spin_header = QSpinBox()
+        spin_header.setMinimum(1)
+        spin_header.setMaximum(50)
+        spin_header.setValue(1)
+        spin_header.setAlignment(Qt.AlignCenter)
+        spin_header.setMinimumWidth(90)   # 5 个汉字宽度
+        spin_header.setPrefix("第 ")
+        spin_header.setSuffix(" 行")
+        row_layout.addWidget(spin_header)
+        row_layout.addSpacing(12)   # 表头行后预留空间
+
+        # 一键匹配按钮
+        btn_match = QPushButton("一键匹配表头")
+        btn_match.setMinimumWidth(120)
+        btn_match.setMinimumHeight(36)
+        btn_match.setCursor(Qt.PointingHandCursor)
+        btn_match.setStyleSheet("""
+            QPushButton {
+                background-color: #ecfdf5;
+                border: 1px solid #10b981;
+                border-radius: 6px;
+                color: #065f46;
+                font-weight: bold;
+                padding: 4px 12px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #d1fae5;
+                border: 1px solid #059669;
+            }
+            QPushButton:pressed {
+                background-color: #a7f3d0;
+            }
+            QPushButton:disabled {
+                background-color: #f3f4f6;
+                border: 1px solid #d1d5db;
+                color: #9ca3af;
+            }
+        """)
+        row_layout.addWidget(btn_match)
+        row_layout.addSpacing(12)   # 一键匹配与删除之间预留空间
+
+        if not primary:
+            btn_del = QPushButton("删除")
+            btn_del.setMinimumWidth(96)   # 4 个汉字宽度
+            btn_del.setMinimumHeight(36)
+            btn_del.setStyleSheet("""
+                QPushButton {
+                    background-color: #fef2f2;
+                    border: 1px solid #ef4444;
+                    border-radius: 6px;
+                    color: #991b1b;
+                    font-weight: bold;
+                    padding: 4px 10px;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #fee2e2;
+                    border: 1px solid #dc2626;
+                }
+                QPushButton:pressed {
+                    background-color: #fecaca;
+                }
+            """)
+            row_layout.addWidget(btn_del)
+        else:
+            btn_del = None
+
+        row_layout.addStretch(1)
+
+        self.src_container.addWidget(row_widget)
+
+        # ---- 状态 ----
+        src_info = {
+            "path": "",
+            "sheet": "",
+            "headers": [],
+            "data": [],
+            "header_row": 1,
+        }
+        self.sources.append(src_info)
+        w_info = {
+            "row_widget": row_widget,
+            "btn_load": btn_load,
+            "lbl_name": lbl_name,
+            "combo_sheet": combo_sheet,
+            "spin_header": spin_header,
+            "btn_match": btn_match,
+            "btn_del": btn_del,
+            "primary": primary,
+        }
+        self.source_widgets.append(w_info)
+
+        # 信号绑定
+        src_idx = idx  # 闭包捕获
+        btn_load.clicked.connect(lambda _=None, i=src_idx: self._load_source_at(i))
+        if btn_del:
+            btn_del.clicked.connect(lambda _=None, i=src_idx: self._remove_source_at(i))
+        combo_sheet.currentIndexChanged.connect(
+            lambda _, i=src_idx: self._on_source_sheet_changed_at(i)
+        )
+        spin_header.valueChanged.connect(
+            lambda _=None, i=src_idx: self._on_source_header_row_changed_at(i)
+        )
+        btn_match.clicked.connect(lambda _=None, i=src_idx: self._auto_match_headers_for(i))
+
+        # 主源表：绑定到旧变量名（向后兼容）
+        if primary:
+            self.btn_load_source = btn_load
+            self.lbl_source = lbl_name
+            self.combo_source_sheet = combo_sheet
+            self.spin_source_header = spin_header
+
+        # 更新"添加源表格"按钮状态
+        self.btn_add_source.setEnabled(len(self.sources) < self.MAX_SOURCES)
+
+        # 更新所有映射行的源表下拉框
+        self._refresh_srctbl_combos()
+
+    def _remove_source_at(self, idx, silent=False):
+        """删除非主源表行。silent=True 时跳过确认弹窗。"""
+        if idx == 0:
+            return  # 主源表不可删除
+        if idx >= len(self.sources):
+            return
+        if not silent:
+            # 确认
+            src = self.sources[idx]
+            fname = os.path.basename(src.get("path", "")) if src.get("path") else f"源表{idx + 1}"
+            reply = QMessageBox.question(
+                self, "确认删除",
+                f"确定要删除「{fname}」吗？\n相关映射行中的源表选择会被重置为源表1。",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # 移除 UI
+        w = self.source_widgets[idx]
+        w["row_widget"].deleteLater()
+        self.source_widgets.pop(idx)
+        self.sources.pop(idx)
+
+        # 更新后续源表的按钮文字和信号
+        for i in range(idx, len(self.source_widgets)):
+            wi = self.source_widgets[i]
+            # 更新上传按钮文字
+            wi["btn_load"].setText(f"上传源表格{i + 1}")
+            # 重新绑定信号（闭包索引已固定，需要断开重连）
+            wi["btn_load"].clicked.disconnect()
+            wi["combo_sheet"].currentIndexChanged.disconnect()
+            wi["spin_header"].valueChanged.disconnect()
+            wi["btn_match"].clicked.disconnect()
+            if wi.get("btn_del"):
+                wi["btn_del"].clicked.disconnect()
+            new_idx = i
+            wi["btn_load"].clicked.connect(lambda _=None, ii=new_idx: self._load_source_at(ii))
+            wi["combo_sheet"].currentIndexChanged.connect(
+                lambda _, ii=new_idx: self._on_source_sheet_changed_at(ii)
+            )
+            wi["spin_header"].valueChanged.connect(
+                lambda _=None, ii=new_idx: self._on_source_header_row_changed_at(ii)
+            )
+            wi["btn_match"].clicked.connect(lambda _=None, ii=new_idx: self._auto_match_headers_for(ii))
+            if wi.get("btn_del"):
+                wi["btn_del"].clicked.connect(lambda _=None, ii=new_idx: self._remove_source_at(ii))
+
+        # 更新映射行中源表下拉框
+        self._refresh_srctbl_combos()
+
+        # 重置映射行中已删除源表的选中项为源表1
+        for r in range(self.map_table.rowCount()):
+            cb = self.map_table.cellWidget(r, COL_SRCTBL)
+            if cb and cb.currentIndex() >= len(self.sources):
+                cb.setCurrentIndex(0)
+
+        self.btn_add_source.setEnabled(len(self.sources) < self.MAX_SOURCES)
+        self.statusBar().showMessage(f"已删除源表，当前共 {len(self.sources)} 个源表")
+
+    def _source_label(self, idx):
+        """生成源表下拉框的显示文本。"""
+        src = self.sources[idx] if idx < len(self.sources) else None
+        if not src or not src.get("path"):
+            return f"源表{idx + 1}（未加载）"
+        fname = os.path.basename(src["path"])
+        return f"源表{idx + 1}: {fname}"
+
+    def _refresh_srctbl_combos(self):
+        """刷新所有映射行的源表下拉框选项。"""
+        if not hasattr(self, "map_table"):
+            return  # 映射表尚未创建（初始化阶段）
+        labels = [self._source_label(i) for i in range(len(self.sources))]
+        for r in range(self.map_table.rowCount()):
+            cb = self.map_table.cellWidget(r, COL_SRCTBL)
+            if not cb:
+                continue
+            cur = cb.currentText()
+            cb.blockSignals(True)
+            cb.clear()
+            cb.addItems(labels)
+            # 尝试保持原选择
+            if cur in labels:
+                cb.setCurrentText(cur)
+            else:
+                cb.setCurrentIndex(0)
+            cb.blockSignals(False)
+            # 源表切换后重建源列控件
+            self._on_srctbl_changed_at(r)
+
+    def _on_srctbl_changed_at(self, row):
+        """映射行中源表下拉框变化时，重建该行的源列控件。"""
+        cb = self.map_table.cellWidget(row, COL_SRCTBL)
+        if not cb:
+            return
+        src_idx = cb.currentIndex()
+        if src_idx < 0 or src_idx >= len(self.sources):
+            return
+        method_w = self.map_table.cellWidget(row, COL_METHOD)
+        method = method_w.currentText() if method_w else "直接复制"
+        self.rebuild_source_cell(row, method, src_idx)
+
+    def _load_source_at(self, idx):
+        """为指定源表打开文件对话框并加载。"""
+        if idx >= len(self.sources):
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"选择源表{idx + 1}", "",
+            "Excel 文件 (*.xlsx *.xls *.xlsm)"
+        )
+        if not path:
+            return
+        src = self.sources[idx]
+        src["path"] = path
+        src["header_row"] = self.source_widgets[idx]["spin_header"].value()
+        w = self.source_widgets[idx]
+        w["lbl_name"].setText(os.path.basename(path))
+        w["lbl_name"].setToolTip(path)
+        # 填充子表
+        self._populate_source_sheets_at(idx)
+        # 加载数据
+        self._apply_source_load_at(idx)
+        # 刷新映射行源表下拉框（显示文件名）
+        self._refresh_srctbl_combos()
+
+    def _populate_source_sheets_at(self, idx):
+        """填充指定源表的子表下拉框。"""
+        if idx >= len(self.sources):
+            return
+        src = self.sources[idx]
+        path = src.get("path", "")
+        w = self.source_widgets[idx]
+        combo = w["combo_sheet"]
+        if not path:
+            combo.clear()
+            combo.setEnabled(False)
+            src["sheet"] = ""
+            return
+        ext = path.lower()
+        try:
+            sheet_names = []
+            if ext.endswith((".xlsx", ".xlsm")):
+                wb = openpyxl.load_workbook(path, read_only=True)
+                sheet_names = wb.sheetnames
+                wb.close()
+            elif ext.endswith(".xls"):
+                try:
+                    import xlrd
+                    wb = xlrd.open_workbook(path)
+                    sheet_names = wb.sheet_names()
+                except ImportError:
+                    pass
+            if not sheet_names:
+                sheet_names = ["Sheet1"]
+        except Exception:
+            sheet_names = ["Sheet1"]
+
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(sheet_names)
+        combo.setEnabled(len(sheet_names) > 1)
+        src["sheet"] = sheet_names[0]
+        combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _on_source_sheet_changed_at(self, idx):
+        """指定源表的子表切换时重新加载数据。"""
+        if idx >= len(self.sources):
+            return
+        w = self.source_widgets[idx]
+        combo = w["combo_sheet"]
+        sheet_name = combo.currentText()
+        src = self.sources[idx]
+        if not src.get("path") or sheet_name == src.get("sheet"):
+            return
+        src["sheet"] = sheet_name
+        self._apply_source_load_at(idx)
+        # 刷新引用此源表的映射行
+        self._refresh_srctbl_combos()
+
+    def _apply_source_load_at(self, idx):
+        """按当前表头行设置读取指定源表的表头与数据。"""
+        if idx >= len(self.sources):
+            return
+        src = self.sources[idx]
+        path = src.get("path", "")
+        if not path:
+            return
+        hr = self.source_widgets[idx]["spin_header"].value()
+        ext = path.lower()
+        try:
+            if ext.endswith((".xlsx", ".xlsm")):
+                wb = openpyxl.load_workbook(path, data_only=True)
+                ws = wb[src["sheet"]] if src.get("sheet") else wb.active
+                max_row = ws.max_row
+                max_col = ws.max_column
+                if hr < 1 or hr > max_row:
+                    QMessageBox.warning(
+                        self, "表头行错误",
+                        f"源表{idx + 1} 表头行 {hr} 超出范围（共 {max_row} 行）。"
+                    )
+                    wb.close()
+                    return
+                raw = self._merged_row_values(ws, hr, max_col)
+                headers = [self._clean_header(c, i) for i, c in enumerate(raw)]
+                data = [
+                    list(r)
+                    for r in ws.iter_rows(min_row=hr + 1, values_only=True)
+                ]
+                wb.close()
+            elif ext.endswith(".xls"):
+                headers, data, _ = self.read_xls(path, hr, src.get("sheet"))
+            else:
+                QMessageBox.warning(self, "格式错误", f"源表{idx + 1}：不支持的文件格式。")
+                return
+        except ImportError as e:
+            QMessageBox.warning(self, "缺少依赖", str(e))
+            return
+        except Exception as e:
+            QMessageBox.critical(self, "读取失败", f"无法读取源表{idx + 1}：{e}")
+            return
+
+        src["headers"] = headers
+        src["data"] = data
+        src["header_row"] = hr
+
+        # 主源表（idx=0）：同步到旧变量（向后兼容）
+        if idx == 0:
+            self.source_path = path
+            self.source_headers = headers
+            self.source_data = data
+            self.source_header_row = hr
+            self.source_sheet_name = src.get("sheet", "")
+
+        self.statusBar().showMessage(
+            f"已加载源表{idx + 1}：{len(headers)}列，{len(data)}行数据（表头第 {hr} 行）"
+        )
+        self.refresh_after_load()
+
+    def _get_source_idx_for_row(self, row):
+        """获取映射行当前选中的源表索引。"""
+        cb = self.map_table.cellWidget(row, COL_SRCTBL)
+        if not cb:
+            return 0
+        idx = cb.currentIndex()
+        if idx < 0 or idx >= len(self.sources):
+            return 0
+        return idx
+
+    def _get_headers_for_row(self, row):
+        """获取映射行当前源表的表头列表。"""
+        idx = self._get_source_idx_for_row(row)
+        return self.sources[idx].get("headers", []) if idx < len(self.sources) else []
+
+    def _on_source_header_row_changed_at(self, idx):
+        """指定源表的表头行变化时，重新加载该源表。"""
+        if idx < len(self.sources) and self.sources[idx].get("path"):
+            self._apply_source_load_at(idx)
+
     # ========== 映射行管理 ==========
     def _init_mapping(self, rows):
         self.map_table.setRowCount(rows)
@@ -1075,6 +1543,13 @@ class MainWindow(QMainWindow):
         # 导入配置时，用 config 中的 method 决定控件类型（否则合并/拆分的控件会建错）
         if config and config.get("method"):
             default_method = config["method"]
+
+        # 源表选择（第一列）
+        srctbl_cb = QComboBox()
+        srctbl_cb.setStyleSheet("QComboBox { text-align: center; } QComboBox::item { text-align: center; }")
+        srctbl_cb.currentIndexChanged.connect(lambda _: self._on_srctbl_changed_at(row))
+        self.map_table.setCellWidget(row, COL_SRCTBL, srctbl_cb)
+
         # 填入方式
         mc = QComboBox()
         mc.addItems(["直接复制", "合并复制", "拆分复制"])
@@ -1085,10 +1560,9 @@ class MainWindow(QMainWindow):
         mc.lineEdit().setAlignment(Qt.AlignCenter)
         mc.lineEdit().setReadOnly(True)
         self.map_table.setCellWidget(row, COL_METHOD, mc)
-        
 
         # 源列（依据方式决定控件类型）
-        self.rebuild_source_cell(row, default_method)
+        self.rebuild_source_cell(row, default_method, 0)
 
         # 目标列（依据方式决定控件类型）
         self.rebuild_target_cell(row, default_method)
@@ -1124,6 +1598,21 @@ class MainWindow(QMainWindow):
         hl.addWidget(bminus)
         self.map_table.setCellWidget(row, COL_ACTION, aw)
 
+        # 填充源表下拉框选项
+        labels = [self._source_label(i) for i in range(len(self.sources))]
+        srctbl_cb.blockSignals(True)
+        srctbl_cb.clear()
+        srctbl_cb.addItems(labels)
+        if config and config.get("src_tbl_idx") is not None:
+            idx = config["src_tbl_idx"]
+            if 0 <= idx < len(labels):
+                srctbl_cb.setCurrentIndex(idx)
+        else:
+            srctbl_cb.setCurrentIndex(0)
+        srctbl_cb.blockSignals(False)
+        # 源表选定后重建源列控件
+        self._on_srctbl_changed_at(row)
+
         # 应用拖拽/重建时传入的配置（不传则保持空白默认）
         if config:
             self._apply_source(row, config.get("src"))
@@ -1154,8 +1643,10 @@ class MainWindow(QMainWindow):
         method = self.map_table.cellWidget(row, COL_METHOD).currentText()
         sep_w = self.map_table.cellWidget(row, COL_SEP)
         sp_w = self.map_table.cellWidget(row, COL_SPLIT)
+        srctbl_w = self.map_table.cellWidget(row, COL_SRCTBL)
         return {
             "method": method,
+            "src_tbl_idx": srctbl_w.currentIndex() if srctbl_w else 0,
             "src": self.get_source_selection(row),
             "tgt": self.get_target_selection(row),
             "sep": sep_w.text() if sep_w else "-",
@@ -1195,10 +1686,19 @@ class MainWindow(QMainWindow):
         if not path.lower().endswith(".json"):
             path += ".json"
         data = {
-            "version": 3,
-            "source_path": self.source_path,
+            "version": 4,
+            "sources": [
+                {
+                    "path": s.get("path", ""),
+                    "sheet": s.get("sheet", ""),
+                    "header_row": self.source_widgets[i]["spin_header"].value()
+                        if i < len(self.source_widgets) else 1,
+                }
+                for i, s in enumerate(self.sources)
+            ],
+            "source_path": self.source_path,       # 向后兼容
             "target_path": self.target_path,
-            "source_sheet": self.source_sheet_name,
+            "source_sheet": self.source_sheet_name,  # 向后兼容
             "target_sheet": self.target_sheet_name,
             "source_header_row": self.spin_source_header.value(),
             "target_header_row": self.spin_target_header.value(),
@@ -1234,26 +1734,51 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "配置文件为空或格式不正确。")
             return
 
-        # 恢复表头行设置
+        # 恢复表头行设置（v3 兼容：source_header_row 适用于主源表）
         if isinstance(data, dict):
             if data.get("source_header_row"):
                 self.spin_source_header.setValue(data["source_header_row"])
             if data.get("target_header_row"):
                 self.spin_target_header.setValue(data["target_header_row"])
 
-        # 恢复源表格（路径存在则自动加载）
-        src_path = data.get("source_path", "") if isinstance(data, dict) else ""
-        src_sheet = data.get("source_sheet", "") if isinstance(data, dict) else ""
-        if src_path and os.path.isfile(src_path):
-            self.source_path = src_path
-            self.lbl_source.setText(f"源文件：{os.path.basename(src_path)}")
-            self._populate_source_sheets()
-            if src_sheet and self.combo_source_sheet.findText(src_sheet) >= 0:
-                self.combo_source_sheet.setCurrentText(src_sheet)
-                self.source_sheet_name = src_sheet
-            self._apply_source_load()
-        elif src_path:
-            QMessageBox.warning(self, "提示", f"源表格文件不存在，已跳过：\n{src_path}")
+        # 清除现有额外源表（保留主源表行）
+        while len(self.sources) > 1:
+            self._remove_source_at(len(self.sources) - 1, silent=True)
+        # 清除主源表的状态
+        self.sources[0] = {"path": "", "sheet": "", "headers": [], "data": [], "header_row": 1}
+        self.source_widgets[0]["lbl_name"].setText("（未选择）")
+        self.source_widgets[0]["combo_sheet"].clear()
+        self.source_widgets[0]["combo_sheet"].setEnabled(False)
+
+        # 恢复源表格（支持多源表 v4 格式，兼容旧版 v3 单源表格式）
+        sources_list = data.get("sources", []) if isinstance(data, dict) else []
+        if not sources_list and data.get("source_path"):
+            # v3 兼容：单源表格式
+            sources_list = [{"path": data["source_path"], "sheet": data.get("source_sheet", "")}]
+
+        for i, src_item in enumerate(sources_list[:self.MAX_SOURCES]):
+            src_path = src_item.get("path", "")
+            src_sheet = src_item.get("sheet", "")
+            src_hr = src_item.get("header_row", 1)
+            if not src_path or not os.path.isfile(src_path):
+                if src_path:
+                    QMessageBox.warning(self, "提示", f"源表{i + 1}文件不存在，已跳过：\n{src_path}")
+                continue
+            if i >= len(self.sources):
+                self._add_source_row()
+            # 恢复表头行设置（在加载数据前设置）
+            self.source_widgets[i]["spin_header"].setValue(src_hr)
+            self.sources[i]["path"] = src_path
+            self.source_widgets[i]["lbl_name"].setText(os.path.basename(src_path))
+            self.source_widgets[i]["lbl_name"].setToolTip(src_path)
+            self._populate_source_sheets_at(i)
+            if src_sheet:
+                combo = self.source_widgets[i]["combo_sheet"]
+                idx = combo.findText(src_sheet)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+                    self.sources[i]["sheet"] = src_sheet
+            self._apply_source_load_at(i)
 
         # 恢复目标表格
         tgt_path = data.get("target_path", "") if isinstance(data, dict) else ""
@@ -1307,19 +1832,25 @@ class MainWindow(QMainWindow):
                 "以下列名在当前表格中找不到（相关行复制时会被跳过）：\n" + shown
             )
 
-    def rebuild_source_cell(self, row, method):
+    def rebuild_source_cell(self, row, method, src_idx=None):
         old = self.map_table.cellWidget(row, COL_SOURCE)
         if old:
             old.deleteLater()
+        # 获取该行当前源表的表头
+        if src_idx is None:
+            src_idx = self._get_source_idx_for_row(row)
+        headers = (self.sources[src_idx].get("headers", [])
+                   if src_idx < len(self.sources) else [])
         if method == "合并复制":
             btn = QPushButton("点击选择源列…")
             btn.setProperty("selected", [])
             btn.setProperty("kind", "source")
+            btn.setProperty("src_idx", src_idx)
             btn.clicked.connect(lambda _=None: self.open_multi_select())
             self.map_table.setCellWidget(row, COL_SOURCE, btn)
         else:
             cb = QComboBox()
-            cb.addItems(self.source_headers)
+            cb.addItems(headers)
             cb.setCurrentIndex(-1)   # 留空，不预填充
             self.map_table.setCellWidget(row, COL_SOURCE, cb)
 
@@ -1345,7 +1876,8 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         method = combo.currentText()
-        self.rebuild_source_cell(row, method)
+        src_idx = self._get_source_idx_for_row(row)
+        self.rebuild_source_cell(row, method, src_idx)
         self.rebuild_target_cell(row, method)
         sep = self.map_table.cellWidget(row, COL_SEP)
         sp = self.map_table.cellWidget(row, COL_SPLIT)
@@ -1362,9 +1894,12 @@ class MainWindow(QMainWindow):
         if row < 0:
             return
         if kind == "source":
-            items = self.source_headers
+            # 使用该行当前源表的表头
+            src_idx = self._get_source_idx_for_row(row)
+            items = (self.sources[src_idx].get("headers", [])
+                     if src_idx < len(self.sources) else [])
             max_sel = 5
-            title = "选择源列（合并复制，可选 2~5 个）"
+            title = f"选择源列（源表{src_idx + 1}，合并复制，可选 2~5 个）"
         else:
             items = self.target_headers
             sp = self.map_table.cellWidget(row, COL_SPLIT)
@@ -1428,8 +1963,10 @@ class MainWindow(QMainWindow):
     def refresh_after_load(self):
         # 文件加载后重建所有源/目标列控件（保持空白，不预填充），并更新拆分数上限。
         for row in range(self.map_table.rowCount()):
-            method = self.map_table.cellWidget(row, COL_METHOD).currentText()
-            self.rebuild_source_cell(row, method)
+            method_w = self.map_table.cellWidget(row, COL_METHOD)
+            method = method_w.currentText() if method_w else "直接复制"
+            src_idx = self._get_source_idx_for_row(row)
+            self.rebuild_source_cell(row, method, src_idx)
             self.rebuild_target_cell(row, method)
             sp = self.map_table.cellWidget(row, COL_SPLIT)
             if isinstance(sp, QSpinBox):
@@ -1548,13 +2085,18 @@ class MainWindow(QMainWindow):
 
         return (best, best_score) if best_score > 0 else (None, 0)
 
-    def _auto_match_headers(self):
-        """一键匹配表头：先模糊匹配标准字段，再精确匹配其余相同表头。"""
-        if not self.source_headers:
-            QMessageBox.warning(self, "提示", "请先上传源表格。")
+    def _auto_match_headers_for(self, src_idx):
+        """为指定源表一键匹配表头：先模糊匹配标准字段，再精确匹配其余相同表头。
+        匹配结果以新行追加到映射表（不清除已有配置）。
+        """
+        if src_idx >= len(self.sources):
+            return
+        src_headers = self.sources[src_idx].get("headers", [])
+        if not src_headers:
+            QMessageBox.warning(self, "提示", f"请先上传并加载源表格{src_idx + 1}。")
             return
         if not self.target_headers:
-            QMessageBox.warning(self, "提示", "请先上传目标表格。")
+            QMessageBox.warning(self, "提示", "请先上传并加载目标表格。")
             return
 
         # ---- 第一阶段：模糊匹配标准字段 ----
@@ -1563,7 +2105,7 @@ class MainWindow(QMainWindow):
         used_tgt = set()
 
         for std_field in self._STANDARD_FIELDS:
-            src_match, src_score = self._fuzzy_find_match(std_field, self.source_headers)
+            src_match, src_score = self._fuzzy_find_match(std_field, src_headers)
             tgt_match, tgt_score = self._fuzzy_find_match(std_field, self.target_headers)
             if (src_match and tgt_match
                     and src_match not in used_src and tgt_match not in used_tgt):
@@ -1573,7 +2115,7 @@ class MainWindow(QMainWindow):
 
         # ---- 第二阶段：精确匹配其余相同表头 ----
         exact_matches = []
-        for h in self.source_headers:
+        for h in src_headers:
             if h in used_src:
                 continue
             if h in self.target_headers and h not in used_tgt:
@@ -1591,50 +2133,42 @@ class MainWindow(QMainWindow):
         if not all_mappings:
             QMessageBox.information(
                 self, "提示",
-                "源表和目标表没有可匹配的表头，无法自动匹配。"
+                f"源表格{src_idx + 1}和目标表没有可匹配的表头。"
             )
             return
 
-        # 确认是否覆盖现有配置
-        has_content = False
-        for r in range(self.map_table.rowCount()):
-            if self.get_source_selection(r) or self.get_target_selection(r):
-                has_content = True
-                break
-        if has_content:
-            reply = QMessageBox.question(
-                self, "确认覆盖",
-                f"当前已有映射配置，将清空并填入 {len(all_mappings)} 条自动匹配规则。\n是否继续？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes
-            )
-            if reply != QMessageBox.Yes:
-                return
-
-        # 清空现有行，重建为匹配结果
-        self.map_table.setRowCount(0)
+        # 追加到映射表末尾（不清除已有行）
+        start_row = self.map_table.rowCount()
         for i, (src_h, tgt_h, _) in enumerate(all_mappings):
-            self.map_table.insertRow(i)
-            self.add_mapping_row(i, config={
+            row = start_row + i
+            self.map_table.insertRow(row)
+            self.add_mapping_row(row, config={
                 "method": "直接复制",
+                "src_tbl_idx": src_idx,
                 "src": src_h,
                 "tgt": tgt_h,
                 "sep": "-",
                 "split": 1,
             })
-        self.map_table.verticalHeader().setSectionsMovable(True)
 
         # 构建结果消息
-        msg_lines = [f"已自动匹配 {len(all_mappings)} 条表头映射："]
+        msg_lines = [f"已为源表格{src_idx + 1}自动匹配 {len(all_mappings)} 条表头映射："]
         for src_h, tgt_h, method_desc in all_mappings:
             msg_lines.append(f"  · {src_h}  →  {tgt_h}（{method_desc}）")
 
-        unmatched_src = [h for h in self.source_headers if h not in used_src]
+        unmatched_src = [h for h in src_headers if h not in used_src]
         if unmatched_src:
             msg_lines.append(f"\n以下源列未匹配（需手动配置）：")
             msg_lines.append("  " + ", ".join(unmatched_src))
 
         QMessageBox.information(self, "匹配完成", "\n".join(msg_lines))
-        self.statusBar().showMessage(f"已自动匹配 {len(all_mappings)} 条表头映射")
+        self.statusBar().showMessage(
+            f"已为源表格{src_idx + 1}自动匹配 {len(all_mappings)} 条表头映射"
+        )
+
+    def _auto_match_headers(self):
+        """旧接口兼容：对主源表（索引0）执行一键匹配。"""
+        self._auto_match_headers_for(0)
 
     # ========== 子表选择 ==========
     def _populate_source_sheets(self):
@@ -1907,40 +2441,195 @@ class MainWindow(QMainWindow):
         self.target_col_count = len(self.target_headers)
         self.refresh_after_load()
 
-    # ========== 执行与保存 ==========
-    def do_copy(self):
-        if not self.source_headers:
-            QMessageBox.warning(self, "警告", "请先上传并加载源表格。")
+    # ========== 映射预览 ==========
+    def preview_mapping(self):
+        """预览数据映射关系：显示每条规则的前5行数据样例。"""
+        loaded_sources = [i for i, s in enumerate(self.sources) if s.get("path") and s.get("headers")]
+        if not loaded_sources:
+            QMessageBox.warning(self, "提示", "请先上传并加载至少一个源表格。")
             return
         if not self.target_headers:
-            QMessageBox.warning(self, "警告", "请先上传并加载目标表格。")
+            QMessageBox.warning(self, "提示", "请先上传并加载目标表格。")
             return
 
-        # 仅处理「已配置」的行；未配置（源列或目标列为空、合并不足 2 源列、
-        # 拆分目标数与拆分数不符等）的行静默跳过，不再报错阻断。
+        # 收集已配置的规则
         rules = []
         for row in range(self.map_table.rowCount()):
             method = self.map_table.cellWidget(row, COL_METHOD).currentText()
             src_sel = self.get_source_selection(row)
             tgt_sel = self.get_target_selection(row)
+            src_idx = self._get_source_idx_for_row(row)
+
+            if src_idx >= len(self.sources) or not self.sources[src_idx].get("headers"):
+                continue
 
             if method == "合并复制":
                 if not (isinstance(src_sel, list) and len(src_sel) >= 2) or not tgt_sel:
                     continue
-                sep = self.map_table.cellWidget(row, COL_SEP)
-                sep_text = sep.text() if sep else "-"
-                rules.append(("merge", src_sel, tgt_sel, sep_text))
+                sep_w = self.map_table.cellWidget(row, COL_SEP)
+                sep_text = sep_w.text() if sep_w else "-"
+                rules.append(("merge", src_idx, src_sel, tgt_sel, sep_text))
             elif method == "拆分复制":
                 n = self.map_table.cellWidget(row, COL_SPLIT).value()
                 if (not src_sel
                         or not (isinstance(tgt_sel, list) and len(tgt_sel) == n)
                         or len(set(tgt_sel)) != len(tgt_sel)):
                     continue
-                rules.append(("split", src_sel, tgt_sel, n))
+                rules.append(("split", src_idx, src_sel, tgt_sel, n))
+            else:
+                if not src_sel or not tgt_sel:
+                    continue
+                rules.append(("direct", src_idx, src_sel, tgt_sel, None))
+
+        if not rules:
+            QMessageBox.information(self, "预览", "没有已配置的映射规则可预览。")
+            return
+
+        # 构建预览表格
+        preview_rows = []
+        for rule in rules:
+            kind = rule[0]
+            src_idx = rule[1]
+            src_info = self.sources[src_idx]
+            src_headers = src_info.get("headers", [])
+            src_data = src_info.get("data", [])
+            sample_count = min(5, len(src_data))
+
+            if kind == "direct":
+                _, _, src_name, tgt_name, _ = rule
+                if src_name not in src_headers or tgt_name not in self.target_headers:
+                    preview_rows.append((f"源表{src_idx+1}→{tgt_name}", [src_name], ["(列名不匹配)"]))
+                    continue
+                scol = src_headers.index(src_name)
+                samples = []
+                for i in range(sample_count):
+                    val = src_data[i][scol] if scol < len(src_data[i]) else None
+                    samples.append(str(normalize(val)) if val is not None else "")
+                preview_rows.append((f"源表{src_idx+1}·{src_name} → {tgt_name}", [src_name], samples))
+            elif kind == "merge":
+                _, _, src_list, tgt_name, sep = rule
+                scols = []
+                ok = True
+                for s in src_list:
+                    if s not in src_headers:
+                        ok = False
+                        break
+                    scols.append(src_headers.index(s))
+                if not ok:
+                    preview_rows.append((f"源表{src_idx+1}→{tgt_name}(合并)", src_list, ["(列名不匹配)"]))
+                    continue
+                samples = []
+                for i in range(sample_count):
+                    parts = []
+                    for cc in scols:
+                        v = src_data[i][cc] if cc < len(src_data[i]) else None
+                        parts.append(str(normalize(v)) if v is not None else "")
+                    samples.append(sep.join(parts))
+                preview_rows.append((f"源表{src_idx+1}·{'+'.join(src_list)} → {tgt_name}(合并)", src_list, samples))
+            elif kind == "split":
+                _, _, src_name, tgt_cols, nn = rule
+                if src_name not in src_headers:
+                    preview_rows.append((f"源表{src_idx+1}→{','.join(tgt_cols)}(拆分)", [src_name], ["(列名不匹配)"]))
+                    continue
+                scol = src_headers.index(src_name)
+                samples = []
+                for i in range(sample_count):
+                    val = src_data[i][scol] if scol < len(src_data[i]) else None
+                    s = str(normalize(val)) if val is not None else ""
+                    samples.append(s)
+                preview_rows.append((f"源表{src_idx+1}·{src_name} → {','.join(tgt_cols)}(拆分)", [src_name], samples))
+
+        # 弹出预览对话框
+        dlg = QDialog(self)
+        dlg.setWindowTitle("映射预览（前5行数据样例）")
+        dlg.setMinimumSize(800, 500)
+        layout = QVBoxLayout(dlg)
+
+        info = QLabel(f"共 {len(rules)} 条映射规则，以下为每条规则的前 5 行数据预览：")
+        layout.addWidget(info)
+
+        table = QTableWidget()
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels(["序号", "映射关系", "源表", "源列", "目标列", "方式", "数据样例(前5行)"])
+        table.setRowCount(len(preview_rows))
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        for i, (desc, src_cols, samples) in enumerate(preview_rows):
+            # 解析描述获取各字段
+            parts = desc.split("·", 1)
+            src_tbl = parts[0] if len(parts) > 1 else ""
+            rest = parts[1] if len(parts) > 1 else desc
+            if " → " in rest:
+                src_col_part, tgt_part = rest.split(" → ", 1)
+            else:
+                src_col_part, tgt_part = rest, ""
+            method_tag = ""
+            if "(合并)" in tgt_part:
+                method_tag = "合并复制"
+                tgt_part = tgt_part.replace("(合并)", "")
+            elif "(拆分)" in tgt_part:
+                method_tag = "拆分复制"
+                tgt_part = tgt_part.replace("(拆分)", "")
+            else:
+                method_tag = "直接复制"
+
+            table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+            table.setItem(i, 1, QTableWidgetItem(desc))
+            table.setItem(i, 2, QTableWidgetItem(src_tbl))
+            table.setItem(i, 3, QTableWidgetItem(", ".join(src_cols)))
+            table.setItem(i, 4, QTableWidgetItem(tgt_part))
+            table.setItem(i, 5, QTableWidgetItem(method_tag))
+            table.setItem(i, 6, QTableWidgetItem(" | ".join(samples)))
+
+        layout.addWidget(table, 1)
+
+        btn_close = QPushButton("关闭")
+        btn_close.clicked.connect(dlg.accept)
+        layout.addWidget(btn_close)
+        dlg.exec_()
+
+    # ========== 执行与保存 ==========
+    def do_copy(self):
+        # 检查至少有一个已加载的源表
+        loaded_sources = [i for i, s in enumerate(self.sources) if s.get("path") and s.get("headers")]
+        if not loaded_sources:
+            QMessageBox.warning(self, "警告", "请先上传并加载至少一个源表格。")
+            return
+        if not self.target_headers:
+            QMessageBox.warning(self, "警告", "请先上传并加载目标表格。")
+            return
+
+        # 仅处理「已配置」的行；未配置的行静默跳过。
+        # 每条规则额外携带 src_idx（源表索引），用于多源数据读取。
+        rules = []
+        for row in range(self.map_table.rowCount()):
+            method = self.map_table.cellWidget(row, COL_METHOD).currentText()
+            src_sel = self.get_source_selection(row)
+            tgt_sel = self.get_target_selection(row)
+            src_idx = self._get_source_idx_for_row(row)
+
+            # 跳过未加载的源表
+            if src_idx >= len(self.sources) or not self.sources[src_idx].get("headers"):
+                continue
+
+            if method == "合并复制":
+                if not (isinstance(src_sel, list) and len(src_sel) >= 2) or not tgt_sel:
+                    continue
+                sep = self.map_table.cellWidget(row, COL_SEP)
+                sep_text = sep.text() if sep else "-"
+                rules.append(("merge", src_idx, src_sel, tgt_sel, sep_text))
+            elif method == "拆分复制":
+                n = self.map_table.cellWidget(row, COL_SPLIT).value()
+                if (not src_sel
+                        or not (isinstance(tgt_sel, list) and len(tgt_sel) == n)
+                        or len(set(tgt_sel)) != len(tgt_sel)):
+                    continue
+                rules.append(("split", src_idx, src_sel, tgt_sel, n))
             else:  # 直接复制
                 if not src_sel or not tgt_sel:
                     continue
-                rules.append(("direct", src_sel, tgt_sel, None))
+                rules.append(("direct", src_idx, src_sel, tgt_sel, None))
 
         if not rules:
             QMessageBox.warning(
@@ -1949,7 +2638,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 选择输出路径（默认源/目标所在目录，文件名=目标文件名+时间）
+        # 选择输出路径
         default_dir = os.path.dirname(self.target_path or self.source_path or ".")
         target_base = os.path.splitext(os.path.basename(self.target_path))[0] if self.target_path else "output"
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M")
@@ -1982,7 +2671,6 @@ class MainWindow(QMainWindow):
         else:
             wb = openpyxl.Workbook()
             ws = wb.active
-            # .xls 目标无格式可保留，按表头行写入表头
             for c, h in enumerate(self.target_headers):
                 ws.cell(row=self.target_header_row, column=c + 1, value=h)
 
@@ -1992,44 +2680,64 @@ class MainWindow(QMainWindow):
             if hasattr(cell, 'value') and not isinstance(cell, openpyxl.cell.cell.MergedCell):
                 cell.value = value
                 return
-            # 该单元格是 MergedCell，找到所属合并区域并解除
             for rng in list(ws.merged_cells.ranges):
                 if rng.min_row <= row <= rng.max_row and rng.min_col <= col <= rng.max_col:
                     ws.unmerge_cells(str(rng))
                     break
             ws.cell(row=row, column=col, value=value)
 
-        n = len(self.source_data)
-        for kind, a, b, c in rules:
+        # 多源数据复制：每条规则包含 src_idx，从对应源表读取数据
+        # 不同源表的行数可能不同，各自独立写入
+        for rule in rules:
+            kind = rule[0]
+            src_idx = rule[1]
+
+            # 获取该规则对应源表的表头和数据
+            src_info = self.sources[src_idx] if src_idx < len(self.sources) else {}
+            src_headers = src_info.get("headers", [])
+            src_data = src_info.get("data", [])
+            n = len(src_data)
+
             if kind == "direct":
-                src_name, tgt_name, _ = a, b, c
-                scol = self.source_headers.index(src_name)
+                _, _, src_name, tgt_name, _ = rule
+                if src_name not in src_headers or tgt_name not in self.target_headers:
+                    continue  # 列名不匹配，跳过
+                scol = src_headers.index(src_name)
                 tcol = self.target_headers.index(tgt_name)
                 for i in range(n):
-                    rowdata = self.source_data[i]
+                    rowdata = src_data[i]
                     val = rowdata[scol] if scol < len(rowdata) else None
                     safe_write(ws, data_start + i, tcol + 1, normalize(val))
             elif kind == "merge":
-                src_list, tgt_name, sep = a, b, c
-                scols = [self.source_headers.index(s) for s in src_list]
+                _, _, src_list, tgt_name, sep = rule
+                if tgt_name not in self.target_headers:
+                    continue
+                # 检查所有源列是否存在
+                missing = [s for s in src_list if s not in src_headers]
+                if missing:
+                    continue
+                scols = [src_headers.index(s) for s in src_list]
                 tcol = self.target_headers.index(tgt_name)
                 for i in range(n):
-                    rowdata = self.source_data[i]
+                    rowdata = src_data[i]
                     parts = []
                     for cc in scols:
                         v = rowdata[cc] if cc < len(rowdata) else None
                         parts.append(str(normalize(v)) if v is not None else "")
                     safe_write(ws, data_start + i, tcol + 1, sep.join(parts))
             elif kind == "split":
-                src_name, tgt_cols, nn = a, b, c
-                scol = self.source_headers.index(src_name)
+                _, _, src_name, tgt_cols, nn = rule
+                if src_name not in src_headers:
+                    continue
+                scol = src_headers.index(src_name)
                 for i in range(n):
-                    rowdata = self.source_data[i]
+                    rowdata = src_data[i]
                     v = rowdata[scol] if scol < len(rowdata) else None
                     s = str(normalize(v)) if v is not None else ""
                     for tname in tgt_cols:
-                        tcol = self.target_headers.index(tname)
-                        safe_write(ws, data_start + i, tcol + 1, s)
+                        if tname in self.target_headers:
+                            tcol = self.target_headers.index(tname)
+                            safe_write(ws, data_start + i, tcol + 1, s)
         wb.save(out)
 
 
@@ -2043,7 +2751,7 @@ def main():
             app.setFont(f)
             break
     win = MainWindow()
-    win.show()
+    win.showMaximized()   # 启动时全屏最大化
     sys.exit(_app_exec(app))
 
 
