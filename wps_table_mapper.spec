@@ -6,8 +6,6 @@
 
 from PyInstaller.utils.hooks import collect_all
 
-block_cipher = None
-
 # 完整收集 PyQt5 的所有数据/二进制/隐藏导入（含 Qt 平台插件，防止运行时报错）
 pyqt5_datas, pyqt5_binaries, pyqt5_hidden = collect_all('PyQt5')
 
@@ -41,11 +39,10 @@ a = Analysis(
         'torch',
         'tensorflow',
     ],
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,
@@ -58,7 +55,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     console=False,
     icon=None,

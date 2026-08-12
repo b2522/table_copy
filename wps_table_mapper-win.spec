@@ -1,13 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec file — WPS表格字段映射工具
-在麒麟 Linux 上运行：pyinstaller wps_table_mapper.spec --clean --noconfirm
-或直接执行 ./build.sh
+"""PyInstaller spec file — WPS表格字段映射工具 (Windows)
+在 Windows 上运行：pyinstaller wps_table_mapper-win.spec --clean --noconfirm
 """
 
 import sys
 import os
-
-block_cipher = None
 
 # 尝试收集 PyQt5 所有组件（若失败则回退到手动 hiddenimports）
 try:
@@ -43,11 +40,10 @@ a = Analysis(
         'torch',
         'tensorflow',
     ],
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,
